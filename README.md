@@ -295,7 +295,19 @@ If your material system differs significantly from the calibration set:
 4. Normalize each datum by the void-free baseline: `KD = σ(Vp) / σ(0)`.
 5. Regress `ln(KD)` vs `Vp` (slope `= −alpha`) for Judd-Wright, or `ln(KD)` vs `ln(1 − Vp)` (slope `= n`) for the power law.
 
-Custom `alpha` / `n` values are not currently exposed as public API; until a configuration hook lands, supply them by subclassing `EmpiricalSolver` and overriding `_JUDD_WRIGHT_ALPHA_QI` / `_POWER_LAW_N_QI`.
+Custom `alpha` / `n` / `beta` values are exposed as keyword-only constructor arguments on `EmpiricalSolver`. Overrides are partial (modes you don't pass keep the calibrated defaults) and are layup-scaled exactly like the built-in coefficients:
+
+```python
+# Fitted ILSS alpha for a custom material; other modes keep QI defaults.
+solver = EmpiricalSolver(
+    mesh, material,
+    judd_wright_alpha={'ilss': 12.0},
+    power_law_n={'ilss': 5.2},
+    linear_beta={'ilss': 11.0},
+)
+```
+
+At the QI reference layup (`f_md = 0.5`, `scale = 1.0`) the override is used directly; for a different layup it scales the same way as the QI baseline (e.g. with a UD layup, `judd_wright_alpha={'ilss': 12.0}` becomes an effective `12.0 × 0.80 = 9.6` because ILSS uses a 0.80 floor — see [Layup scaling](#layup-scaling)). Override values must be positive finite numbers; mode keys must be a subset of `{'compression', 'tension', 'shear', 'ilss'}`.
 
 ### Finite Element Solver
 

@@ -69,6 +69,55 @@ class MaterialProperties:
     fiber_modulus: float          # E_f (MPa)
     fiber_volume_fraction: float  # V_f (pristine)
 
+    def __post_init__(self):
+        # Stiffness moduli must be positive finite (non-zero for 1/E in compliance).
+        for name in ('E11', 'E22', 'E33', 'G12', 'G13', 'G23',
+                     'matrix_modulus', 'fiber_modulus'):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(
+                    f"MaterialProperties.{name} must be a positive finite number "
+                    f"(MPa), got {value!r}."
+                )
+        # Poisson ratios must be in (-1, 0.5) for an isotropic-stable matrix
+        # (the matrix stiffness uses (1 - 2*nu_m) in the denominator) and for
+        # well-posed orthotropic compliance entries.
+        for name in ('nu12', 'nu13', 'nu23', 'matrix_poisson'):
+            value = getattr(self, name)
+            if not np.isfinite(value) or not (-1.0 < value < 0.5):
+                raise ValueError(
+                    f"MaterialProperties.{name} must be a finite Poisson's ratio "
+                    f"in (-1, 0.5), got {value!r}."
+                )
+        # Strengths must be positive finite (used as 1/X in Tsai-Wu).
+        for name in ('sigma_1c', 'sigma_1t', 'sigma_2t', 'sigma_2c',
+                     'tau_12', 'tau_ilss'):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(
+                    f"MaterialProperties.{name} must be a positive finite "
+                    f"strength (MPa), got {value!r}."
+                )
+        # Geometry
+        if not np.isfinite(self.t_ply) or self.t_ply <= 0:
+            raise ValueError(
+                f"MaterialProperties.t_ply must be a positive ply thickness (mm), "
+                f"got {self.t_ply!r}."
+            )
+        if not isinstance(self.n_plies, (int, np.integer)) or self.n_plies <= 0:
+            raise ValueError(
+                f"MaterialProperties.n_plies must be a positive integer, "
+                f"got {self.n_plies!r}."
+            )
+        # Fiber volume fraction
+        if (not np.isfinite(self.fiber_volume_fraction)
+                or not (0.0 < self.fiber_volume_fraction < 1.0)):
+            raise ValueError(
+                f"MaterialProperties.fiber_volume_fraction must be a fraction in "
+                f"(0, 1), got {self.fiber_volume_fraction!r}. "
+                f"(Pass a fraction such as 0.60, not a percent.)"
+            )
+
     @property
     def total_thickness(self) -> float:
         return self.t_ply * self.n_plies
@@ -191,6 +240,31 @@ class VoidGeometry:
     def __init__(self, center: Tuple, radii: Tuple, orientation: float = 0.0):
         self.center = np.array(center, dtype=float)
         self.radii = np.array(radii, dtype=float)
+        if self.center.shape != (3,):
+            raise ValueError(
+                f"VoidGeometry.center must have 3 components (x, y, z), "
+                f"got shape {self.center.shape}."
+            )
+        if self.radii.shape != (3,):
+            raise ValueError(
+                f"VoidGeometry.radii must have 3 components (a, b, c), "
+                f"got shape {self.radii.shape}."
+            )
+        if not np.all(np.isfinite(self.radii)) or np.any(self.radii <= 0):
+            raise ValueError(
+                f"VoidGeometry.radii must be 3 positive finite numbers "
+                f"(used as 1/r in the ellipsoid containment test), "
+                f"got {self.radii.tolist()}."
+            )
+        if not np.all(np.isfinite(self.center)):
+            raise ValueError(
+                f"VoidGeometry.center must be finite, got {self.center.tolist()}."
+            )
+        if not np.isfinite(orientation):
+            raise ValueError(
+                f"VoidGeometry.orientation must be a finite angle (radians), "
+                f"got {orientation!r}."
+            )
         self.orientation = orientation
 
     def _to_local(self, x, y, z):
@@ -424,9 +498,28 @@ class PorosityField:
 class CompositeMesh:
     """3D structured hex mesh with porosity."""
 
+    # Cap mesh dimensions to prevent accidental memory blowup. A million-element
+    # mesh is already ~100x what the GUI spinboxes allow; an order of magnitude
+    # above that is almost certainly a typo or unit confusion.
+    _MAX_ELEMENTS_PER_AXIS = 10_000
+
     def __init__(self, porosity_field: PorosityField, material: MaterialProperties,
                  nx: int = 50, ny: int = 20, nz: int = 24,
                  ply_angles: Optional[List[float]] = None):
+        for axis_name, value in (('nx', nx), ('ny', ny), ('nz', nz)):
+            if not isinstance(value, (int, np.integer)) or value <= 0:
+                raise ValueError(
+                    f"CompositeMesh.{axis_name} must be a positive integer "
+                    f"(elements per axis), got {value!r}."
+                )
+            if value > self._MAX_ELEMENTS_PER_AXIS:
+                raise ValueError(
+                    f"CompositeMesh.{axis_name}={value} exceeds the "
+                    f"{self._MAX_ELEMENTS_PER_AXIS} per-axis cap. "
+                    f"Such a fine mesh would exhaust memory; "
+                    f"reduce or split the analysis."
+                )
+
         self.porosity_field = porosity_field
         self.material = material
         self.nx = nx
@@ -707,10 +800,32 @@ class EmpiricalSolver:
     _F_MD_FLOOR_ILSS = 0.80  # ILSS is always matrix-dominated
 
     def __init__(self, mesh: CompositeMesh, material: MaterialProperties,
-                 ply_angles: Optional[List[float]] = None):
+                 ply_angles: Optional[List[float]] = None,
+                 *,
+                 judd_wright_alpha: Optional[Dict[str, float]] = None,
+                 power_law_n: Optional[Dict[str, float]] = None,
+                 linear_beta: Optional[Dict[str, float]] = None):
+        """Empirical knockdown solver.
+
+        ``judd_wright_alpha`` / ``power_law_n`` / ``linear_beta`` are optional
+        partial overrides for the QI-calibrated coefficients (see README
+        "Empirical Strength Knockdown"). Each accepts a dict keyed by mode
+        (``'compression'`` / ``'tension'`` / ``'shear'`` / ``'ilss'``); modes
+        that are absent fall back to the QI defaults. Override values are
+        layup-scaled exactly like the defaults: at ``f_md = 0.5`` the
+        scale is 1.0, so a passed-in ``alpha`` is the value used directly.
+        """
         self.mesh = mesh
         self.material = material
         self.nodal_knockdown = None
+
+        # Resolve coefficient dicts: per-mode merge of class default with override.
+        alpha_qi = self._merge_coefficient_override(
+            self._JUDD_WRIGHT_ALPHA_QI, judd_wright_alpha, 'judd_wright_alpha')
+        n_qi = self._merge_coefficient_override(
+            self._POWER_LAW_N_QI, power_law_n, 'power_law_n')
+        beta_qi = self._merge_coefficient_override(
+            self._LINEAR_BETA_QI, linear_beta, 'linear_beta')
 
         # Compute layup-dependent scaling
         self.f_md = self._matrix_dominated_fraction(ply_angles)
@@ -721,9 +836,40 @@ class EmpiricalSolver:
         self.LINEAR_BETA = {}
         for mode in ['compression', 'tension', 'shear', 'ilss']:
             s = self._layup_scale(mode)
-            self.JUDD_WRIGHT_ALPHA[mode] = self._JUDD_WRIGHT_ALPHA_QI[mode] * s
-            self.POWER_LAW_N[mode] = max(self._POWER_LAW_N_QI[mode] * s, 0.1)
-            self.LINEAR_BETA[mode] = self._LINEAR_BETA_QI[mode] * s
+            self.JUDD_WRIGHT_ALPHA[mode] = alpha_qi[mode] * s
+            self.POWER_LAW_N[mode] = max(n_qi[mode] * s, 0.1)
+            self.LINEAR_BETA[mode] = beta_qi[mode] * s
+
+    @classmethod
+    def _merge_coefficient_override(cls, defaults: Dict[str, float],
+                                    override: Optional[Dict[str, float]],
+                                    name: str) -> Dict[str, float]:
+        """Validate ``override`` and merge it onto ``defaults``."""
+        if override is None:
+            return dict(defaults)
+        if not isinstance(override, dict):
+            raise TypeError(
+                f"{name} must be a dict mapping mode -> coefficient, "
+                f"got {type(override).__name__}."
+            )
+        valid_modes = set(cls.PRISTINE_STRENGTH_KEY)
+        unknown = set(override) - valid_modes
+        if unknown:
+            raise ValueError(
+                f"{name} has unknown mode keys {sorted(unknown)}. "
+                f"Use a subset of {sorted(valid_modes)}."
+            )
+        for mode, value in override.items():
+            if not isinstance(value, (int, float, np.floating, np.integer)):
+                raise TypeError(
+                    f"{name}[{mode!r}] must be a number, "
+                    f"got {type(value).__name__}."
+                )
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(
+                    f"{name}[{mode!r}] must be a positive finite number, got {value!r}."
+                )
+        return {**defaults, **override}
 
     @staticmethod
     def _matrix_dominated_fraction(ply_angles: Optional[List[float]]) -> float:
@@ -1570,8 +1716,19 @@ def _mt_effective_stiffness(C_m: np.ndarray, Vp: float,
 
     I6 = np.eye(6)
     inner = I6 - (1 - Vp) * S
-    inner_inv = np.linalg.inv(inner)
+    # The Mori-Tanaka concentration tensor `inner` becomes singular as Vp -> 1
+    # for high-aspect-ratio (oblate) voids even before the Vp > 0.99 early-out
+    # above is reached. Falling back to pinv keeps the result finite instead of
+    # propagating NaN/inf through the assembled stiffness.
+    try:
+        inner_inv = np.linalg.inv(inner)
+    except np.linalg.LinAlgError:
+        inner_inv = np.linalg.pinv(inner)
     C_eff = C_m @ (I6 - Vp * inner_inv)
+    if not np.all(np.isfinite(C_eff)):
+        # Last-ditch: return the void-saturated zero stiffness rather than
+        # silently emitting NaN/inf from a near-singular inner.
+        return np.zeros((6, 6))
     return C_eff
 
 
@@ -1734,6 +1891,27 @@ class Hex8Element:
         self.node_porosities = np.asarray(node_porosities, dtype=float)
         if self.node_porosities.shape != (8,):
             raise ValueError(f"node_porosities must be (8,), got {self.node_porosities.shape}.")
+        if not np.all(np.isfinite(self.node_porosities)):
+            raise ValueError(
+                f"node_porosities must be finite; "
+                f"received NaN/inf values would propagate as NaN through "
+                f"the assembled stiffness."
+            )
+        # Allow a small fp overshoot (~1e-9) and clip back into [0, 1]; reject
+        # anything beyond that as a clear unit/percent confusion.
+        eps = 1e-9
+        too_low = self.node_porosities < -eps
+        too_high = self.node_porosities > 1.0 + eps
+        if np.any(too_low) or np.any(too_high):
+            bad = self.node_porosities[too_low | too_high]
+            hint = ""
+            if np.any(too_high) and np.max(bad) >= 1.0 + 1e-3:
+                hint = " (Pass a fraction in [0, 1], not a percent.)"
+            raise ValueError(
+                f"node_porosities must be a fraction in [0, 1] (per node), "
+                f"got out-of-range values {bad.tolist()}.{hint}"
+            )
+        self.node_porosities = np.clip(self.node_porosities, 0.0, 1.0)
         self.void_shape_radii = void_shape_radii
         self.nu_m = nu_m
         self.C_m = np.asarray(C_m, dtype=float)
@@ -2540,9 +2718,19 @@ class FESolver:
 
         max_fi = 0.0
         n_elem, n_gp, _ = stress_local.shape
+        # Defense in depth: a single non-finite value in the porosity field
+        # (e.g. from upstream NaN propagation) silently corrupts elem_Vp via
+        # np.mean; clip + isfinite check stops it from reaching Tsai-Wu.
+        if not np.all(np.isfinite(self.mesh.porosity)):
+            raise ValueError(
+                "mesh.porosity contains non-finite values; refusing to evaluate "
+                "Tsai-Wu on a corrupted porosity field."
+            )
         for e in range(n_elem):
             # Compute per-element porosity-degraded strengths
             elem_Vp = float(np.mean(self.mesh.porosity[self.mesh.elements[e]]))
+            # fp noise can push elem_Vp ~1e-15 above 1.0 — clip silently.
+            elem_Vp = float(np.clip(elem_Vp, 0.0, 1.0))
 
             # Skip void elements (carry no meaningful load)
             if elem_Vp > 0.95:
@@ -2579,19 +2767,38 @@ class FESolver:
             S12 = mat.tau_12 * r_matrix   # matrix-dominated
             S23 = mat.tau_ilss * r_matrix # matrix-dominated
 
-            # Tsai-Wu coefficients (recomputed per element)
-            F1 = 1.0 / Xt - 1.0 / Xc
-            F2 = 1.0 / Yt - 1.0 / Yc
-            F3 = F2  # transverse isotropy
-            F11 = 1.0 / (Xt * Xc)
-            F22 = 1.0 / (Yt * Yc)
-            F33 = F22
-            F44 = 1.0 / S23**2
-            F55 = 1.0 / S12**2
-            F66 = 1.0 / S12**2
-            F12 = -0.5 * np.sqrt(F11 * F22)
-            F13 = F12
-            F23 = -0.5 * np.sqrt(F22 * F33)
+            # Tsai-Wu coefficients (recomputed per element).
+            # Strengths approaching zero make the 1/X reciprocals overflow to
+            # inf; clamp to a numerical floor so that a heavily-degraded element
+            # produces a large-but-finite failure index instead of poisoning
+            # max_fi (and therefore the JSON-exported knockdown) with inf/NaN.
+            strength_floor = 1e-3  # MPa
+            Xt_s = max(Xt, strength_floor)
+            Xc_s = max(Xc, strength_floor)
+            Yt_s = max(Yt, strength_floor)
+            Yc_s = max(Yc, strength_floor)
+            S12_s = max(S12, strength_floor)
+            S23_s = max(S23, strength_floor)
+
+            with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+                F1 = 1.0 / Xt_s - 1.0 / Xc_s
+                F2 = 1.0 / Yt_s - 1.0 / Yc_s
+                F3 = F2
+                F11 = 1.0 / (Xt_s * Xc_s)
+                F22 = 1.0 / (Yt_s * Yc_s)
+                F33 = F22
+                F44 = 1.0 / S23_s**2
+                F55 = 1.0 / S12_s**2
+                F66 = 1.0 / S12_s**2
+                # F12, F23 require sqrt of a product. Guard against negative
+                # products from any future mis-degraded coefficients (currently
+                # impossible because F11/F22/F33 are 1/(positive*positive),
+                # but cheap insurance for refactors).
+                F11_F22 = max(F11 * F22, 0.0)
+                F22_F33 = max(F22 * F33, 0.0)
+                F12 = -0.5 * np.sqrt(F11_F22)
+                F13 = F12
+                F23 = -0.5 * np.sqrt(F22_F33)
 
             for g in range(n_gp):
                 s = stress_local[e, g]
@@ -2600,6 +2807,14 @@ class FESolver:
                       F44 * s[3]**2 + F55 * s[4]**2 + F66 * s[5]**2 +
                       2 * F12 * s[0] * s[1] + 2 * F13 * s[0] * s[2] +
                       2 * F23 * s[1] * s[2])
+                if not np.isfinite(fi):
+                    raise ValueError(
+                        f"Tsai-Wu failure index is non-finite at element {e}, "
+                        f"Gauss point {g} (Vp={elem_Vp:.4f}, "
+                        f"stress={s.tolist()}). This usually indicates a "
+                        f"degenerate stiffness or strength matrix; refine the "
+                        f"mesh or check input bounds."
+                    )
                 if fi > max_fi:
                     max_fi = fi
 
