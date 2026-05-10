@@ -1309,7 +1309,7 @@ if HAS_PYQT6:
                                 "knockdown": r["knockdown"],
                             }
 
-                    with open(filepath, "w") as f:
+                    with open(filepath, "w", encoding="utf-8") as f:
                         json.dump(output, f, indent=2)
 
                     self.statusBar().showMessage(f"Results exported to {filepath}")

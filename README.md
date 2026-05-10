@@ -88,6 +88,57 @@ print(f"Knockdown: {result['knockdown']:.3f}")
 results = compare_configurations(0.03, material_name='T800_epoxy')
 ```
 
+### Defining a custom material
+
+Six material presets are available in the `MATERIALS` dict (see the
+[Features](#features) list). To analyze a system that isn't in the built-in
+set, construct a `MaterialProperties` instance directly and pass it through
+the analysis pipeline — there is no separate registration step required.
+
+```python
+from porosity_fe_analysis import MaterialProperties, PorosityField, CompositeMesh, EmpiricalSolver
+
+# Define a custom T700 / toughened-epoxy system
+my_material = MaterialProperties(
+    # Stiffness (MPa)
+    E11=140000.0, E22=10500.0, E33=10500.0,
+    G12=4900.0,   G13=4900.0,  G23=3700.0,
+    nu12=0.30,    nu13=0.30,   nu23=0.42,
+    # Strength (MPa)
+    sigma_1c=1300.0, sigma_1t=2500.0,
+    sigma_2t=70.0,   sigma_2c=210.0,
+    tau_12=90.0,     tau_ilss=85.0,
+    # Geometry
+    t_ply=0.180,  n_plies=24,
+    # Constituents (used by the FE solver's micromechanics path)
+    matrix_modulus=3400.0,  matrix_poisson=0.36,
+    fiber_modulus=240000.0, fiber_volume_fraction=0.60,
+)
+
+pf = PorosityField(my_material, void_volume_fraction=0.03, distribution='uniform')
+mesh = CompositeMesh(pf, my_material, nx=30, ny=10, nz=12)
+solver = EmpiricalSolver(mesh, my_material)
+print(solver.get_failure_load(mode='compression', model='judd_wright'))
+```
+
+Notes:
+- All stiffnesses and strengths are **MPa**; thicknesses are **mm**.
+- All `MaterialProperties` fields are required — there are no defaults for
+  the engineering constants. Cross-check anisotropy bounds (`ν12 < 0.5`,
+  `E11 > E22`, etc.) before running.
+- The FE micromechanics path uses `matrix_modulus`, `matrix_poisson`,
+  `fiber_modulus`, and `fiber_volume_fraction` to compute the Eshelby
+  stiffness degradation. Supply realistic constituent values even if you
+  only plan to run the empirical solver — both paths share the same
+  `MaterialProperties` object.
+- To use this material with the included CLI / batch scripts, you can also
+  add it to the `MATERIALS` dict in `porosity_fe_analysis.py` so it can be
+  selected by name (`compare_configurations(..., material_name='my_system')`).
+- The empirical knockdown coefficients (`alpha`, `n`, `beta`) live on
+  `EmpiricalSolver`, not on `MaterialProperties`. To recalibrate them for
+  a non-standard material system, see
+  [Calibrating `alpha` / `n` for a custom material](#calibrating-alpha--n-for-a-custom-material).
+
 ### Build macOS GUI app
 ```bash
 pip install pyinstaller
@@ -127,6 +178,50 @@ validate_porosity --quiet            # suppress progress output
 | `porosity_comparison_*.png` | Model comparison bar charts |
 | `porosity_knockdown_curves.png` | Knockdown vs porosity curves |
 | `porosity_analysis_results_*.json` | Numerical results (JSON) |
+
+## Inputs and Conventions
+
+### Void volume fraction `Vp`
+
+`Vp` is **always** a dimensionless **fraction in `[0, 1]`** — never a percent.
+
+| You want to model | Pass | Do **not** pass |
+|---|---|---|
+| 1% porosity  | `Vp = 0.01` | `Vp = 1.0`  |
+| 3% porosity  | `Vp = 0.03` | `Vp = 3.0`  |
+| 10% porosity | `Vp = 0.10` | `Vp = 10.0` |
+
+The plotting axes display `Vp * 100 (%)` for readability; that is a display
+convention only. The constructor (`PorosityField(..., void_volume_fraction=Vp)`)
+rejects values outside `[0, 1]` with a `ValueError` and offers a percent-vs-fraction
+hint when the value is plausibly a percent (`Vp ≥ 1.001`).
+
+### Per-ply vs. specimen-average porosity
+
+The empirical knockdown path (`EmpiricalSolver`) treats `Vp` as the
+**specimen-average** void volume fraction. Strength is degraded once at the
+laminate level via `σ(Vp) = KD(Vp) · σ₀`; modulus reduction is **not** applied
+per-ply by the empirical solver.
+
+The FE path (`FESolver`) builds a 3D hexahedral mesh and applies stiffness
+degradation **per element**, with the local porosity at each element coming
+from `PorosityField.local_porosity(x, y, z)`. The through-thickness profile
+depends on the `distribution` argument:
+
+| `distribution`  | Meaning                                                                |
+|-----------------|------------------------------------------------------------------------|
+| `'uniform'`     | Same `Vp` in every element (and every ply).                            |
+| `'clustered'`   | Gaussian profile centered at `cluster_location` (midplane / surface / quarter), normalized so the through-thickness mean equals `Vp`. |
+| `'interface'`   | Gaussian peaks at every ply-to-ply interface, normalized so the through-thickness mean equals `Vp`. |
+
+In all three cases the input `Vp` is the **target specimen average**; the
+profile is normalized so that averaging it over the full thickness recovers
+`Vp` (subject to discrete-void contributions, which are added afterwards).
+
+Layup orientation enters the empirical path through the matrix-dominated
+fraction `f_md` (see [Layup scaling](#layup-scaling) below) — the model
+penalizes matrix-dominated layups more than fiber-dominated ones for the
+same `Vp`.
 
 ## Physics Models
 
@@ -200,7 +295,19 @@ If your material system differs significantly from the calibration set:
 4. Normalize each datum by the void-free baseline: `KD = σ(Vp) / σ(0)`.
 5. Regress `ln(KD)` vs `Vp` (slope `= −alpha`) for Judd-Wright, or `ln(KD)` vs `ln(1 − Vp)` (slope `= n`) for the power law.
 
-Custom `alpha` / `n` values are not currently exposed as public API; until a configuration hook lands, supply them by subclassing `EmpiricalSolver` and overriding `_JUDD_WRIGHT_ALPHA_QI` / `_POWER_LAW_N_QI`.
+Custom `alpha` / `n` / `beta` values are exposed as keyword-only constructor arguments on `EmpiricalSolver`. Overrides are partial (modes you don't pass keep the calibrated defaults) and are layup-scaled exactly like the built-in coefficients:
+
+```python
+# Fitted ILSS alpha for a custom material; other modes keep QI defaults.
+solver = EmpiricalSolver(
+    mesh, material,
+    judd_wright_alpha={'ilss': 12.0},
+    power_law_n={'ilss': 5.2},
+    linear_beta={'ilss': 11.0},
+)
+```
+
+At the QI reference layup (`f_md = 0.5`, `scale = 1.0`) the override is used directly; for a different layup it scales the same way as the QI baseline (e.g. with a UD layup, `judd_wright_alpha={'ilss': 12.0}` becomes an effective `12.0 × 0.80 = 9.6` because ILSS uses a 0.80 floor — see [Layup scaling](#layup-scaling)). Override values must be positive finite numbers; mode keys must be a subset of `{'compression', 'tension', 'shear', 'ilss'}`.
 
 ### Finite Element Solver
 

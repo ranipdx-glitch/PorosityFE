@@ -21,7 +21,7 @@ def test_schema_file_exists():
 
 
 def test_schema_is_valid_jsonschema():
-    with open(SCHEMA_PATH) as f:
+    with open(SCHEMA_PATH, encoding='utf-8') as f:
         schema = json.load(f)
     jsonschema.Draft7Validator.check_schema(schema)
 

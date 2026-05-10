@@ -106,6 +106,47 @@ class TestMaterialProperties:
         mat = MATERIALS['CF_PEEK']
         assert 130000 <= mat.E11 <= 150000
 
+    @staticmethod
+    def _kwargs(**overrides):
+        base = dict(
+            E11=140000.0, E22=10500.0, E33=10500.0,
+            G12=4900.0, G13=4900.0, G23=3700.0,
+            nu12=0.30, nu13=0.30, nu23=0.42,
+            sigma_1c=1300.0, sigma_1t=2500.0,
+            sigma_2t=70.0, sigma_2c=210.0,
+            tau_12=90.0, tau_ilss=85.0,
+            t_ply=0.180, n_plies=24,
+            matrix_modulus=3400.0, matrix_poisson=0.36,
+            fiber_modulus=240000.0, fiber_volume_fraction=0.60,
+        )
+        base.update(overrides)
+        return base
+
+    def test_zero_modulus_rejected(self):
+        with pytest.raises(ValueError, match=r"E11.*positive finite"):
+            MaterialProperties(**self._kwargs(E11=0.0))
+
+    def test_negative_strength_rejected(self):
+        with pytest.raises(ValueError, match=r"sigma_1c.*positive finite"):
+            MaterialProperties(**self._kwargs(sigma_1c=-100.0))
+
+    def test_poisson_at_isotropic_limit_rejected(self):
+        # nu = 0.5 makes (1 - 2*nu) = 0 in the isotropic matrix stiffness
+        with pytest.raises(ValueError, match=r"matrix_poisson.*\(-1, 0\.5\)"):
+            MaterialProperties(**self._kwargs(matrix_poisson=0.5))
+
+    def test_negative_t_ply_rejected(self):
+        with pytest.raises(ValueError, match=r"t_ply.*positive"):
+            MaterialProperties(**self._kwargs(t_ply=-0.1))
+
+    def test_zero_n_plies_rejected(self):
+        with pytest.raises(ValueError, match=r"n_plies.*positive integer"):
+            MaterialProperties(**self._kwargs(n_plies=0))
+
+    def test_fiber_fraction_above_one_rejected(self):
+        with pytest.raises(ValueError, match=r"fiber_volume_fraction"):
+            MaterialProperties(**self._kwargs(fiber_volume_fraction=60.0))
+
 
 class TestVoidGeometry:
     def test_sphere_creation(self):
@@ -192,6 +233,23 @@ class TestVoidGeometry:
         # After 90-degree rotation, major axis is along y
         assert void.contains(np.array([0.0]), np.array([2.5]), np.array([0.0]))[0] == True
         assert void.contains(np.array([2.5]), np.array([0.0]), np.array([0.0]))[0] == False
+
+    def test_zero_radius_rejected(self):
+        with pytest.raises(ValueError, match=r"radii.*positive"):
+            VoidGeometry(center=(0, 0, 0), radii=(0.0, 1.0, 1.0))
+
+    def test_negative_radius_rejected(self):
+        with pytest.raises(ValueError, match=r"radii.*positive"):
+            VoidGeometry(center=(0, 0, 0), radii=(1.0, -1.0, 1.0))
+
+    def test_wrong_radii_shape_rejected(self):
+        with pytest.raises(ValueError, match=r"radii must have 3 components"):
+            VoidGeometry(center=(0, 0, 0), radii=(1.0, 1.0))
+
+    def test_non_finite_orientation_rejected(self):
+        with pytest.raises(ValueError, match=r"orientation"):
+            VoidGeometry(center=(0, 0, 0), radii=(1.0, 1.0, 1.0),
+                         orientation=float('nan'))
 
 
 class TestPorosityField:
@@ -306,6 +364,45 @@ class TestPorosityField:
         pf = PorosityField(self.material, 0.03, void_shape=(2.0, 1.5, 0.5))
         assert pf.void_shape_radii == (2.0, 1.5, 0.5)
 
+    def test_unknown_void_shape_string_raises(self):
+        with pytest.raises(ValueError, match=r"Unknown void_shape"):
+            PorosityField(self.material, 0.03, void_shape='spheroidal')
+
+    def test_unknown_distribution_raises(self):
+        with pytest.raises(ValueError, match=r"Unknown distribution"):
+            PorosityField(self.material, 0.03, distribution='gradient')
+
+    def test_unknown_cluster_location_raises(self):
+        with pytest.raises(ValueError, match=r"Unknown cluster_location"):
+            PorosityField(self.material, 0.03,
+                          distribution='clustered', cluster_location='midplne')
+
+    def test_quarter_cluster_location_supported(self):
+        # 'quarter' is one of the documented cluster locations and should round-trip.
+        pf = PorosityField(self.material, 0.03,
+                           distribution='clustered', cluster_location='quarter')
+        assert pf.cluster_location == 'quarter'
+
+    def test_Vp_snap_to_one_from_fp_noise(self):
+        # numerical noise just above 1.0 should snap to 1.0 instead of raising
+        pf = PorosityField(self.material, 1.0 + 5e-10, distribution='uniform')
+        assert pf.Vp == 1.0
+
+    def test_Vp_just_above_one_no_percent_hint(self):
+        # Values barely above the boundary are likely numerical noise, not
+        # percent confusion — the percent hint should be suppressed.
+        with pytest.raises(ValueError) as exc:
+            PorosityField(self.material, 1.0001, distribution='uniform')
+        assert "Did you pass a percent?" not in str(exc.value)
+
+    def test_Vp_string_rejected_with_typeerror(self):
+        with pytest.raises(TypeError, match=r"numeric type"):
+            PorosityField(self.material, "0.5", distribution='uniform')
+
+    def test_Vp_none_rejected(self):
+        with pytest.raises(ValueError, match=r"None"):
+            PorosityField(self.material, None, distribution='uniform')
+
 
 class TestCompositeMesh:
     def setup_method(self):
@@ -357,6 +454,18 @@ class TestCompositeMesh:
         assert np.min(mesh.nodes[:, 2]) >= 0
         assert abs(np.max(mesh.nodes[:, 2]) - self.material.total_thickness) < 1e-6
 
+    def test_zero_axis_count_rejected(self):
+        with pytest.raises(ValueError, match=r"nx.*positive integer"):
+            CompositeMesh(self.pf, self.material, nx=0, ny=5, nz=6)
+
+    def test_negative_axis_count_rejected(self):
+        with pytest.raises(ValueError, match=r"ny.*positive integer"):
+            CompositeMesh(self.pf, self.material, nx=10, ny=-2, nz=6)
+
+    def test_huge_axis_count_rejected(self):
+        with pytest.raises(ValueError, match=r"exhaust memory|exceeds"):
+            CompositeMesh(self.pf, self.material, nx=20_000, ny=5, nz=6)
+
 
 class TestEmpiricalSolver:
     def setup_method(self):
@@ -401,6 +510,62 @@ class TestEmpiricalSolver:
         result = self.solver.get_failure_load(mode='compression', model='judd_wright')
         assert result['failure_stress'] > 0
         assert 0 < result['knockdown'] <= 1.0
+
+    def test_unknown_loading_mode_raises_with_listing(self):
+        with pytest.raises(ValueError, match=r"Unknown loading mode"):
+            self.solver._get_pristine_strength('flexure')
+
+    def test_override_alpha_only_changes_targeted_mode(self):
+        """Partial override leaves other modes at QI defaults."""
+        solver = EmpiricalSolver(self.mesh, self.material,
+                                  judd_wright_alpha={'ilss': 12.0})
+        # ILSS overridden (and layup scale = 1.0 for default ply_angles=None / f_md=0.5)
+        assert abs(solver.JUDD_WRIGHT_ALPHA['ilss'] - 12.0) < 1e-12
+        # Other modes match the QI baseline at f_md = 0.5
+        assert abs(solver.JUDD_WRIGHT_ALPHA['compression'] - 6.9) < 1e-12
+        assert abs(solver.JUDD_WRIGHT_ALPHA['tension'] - 3.9) < 1e-12
+        assert abs(solver.JUDD_WRIGHT_ALPHA['shear'] - 8.0) < 1e-12
+
+    def test_override_layup_scaling_applied(self):
+        """Override values are scaled by layup the same way as the QI baseline."""
+        ud = [0.0] * 16  # f_md = 0; ILSS floor = 0.80
+        solver = EmpiricalSolver(self.mesh, self.material,
+                                  ply_angles=ud,
+                                  judd_wright_alpha={'ilss': 12.0})
+        assert abs(solver.JUDD_WRIGHT_ALPHA['ilss'] - 12.0 * 0.80) < 1e-12
+
+    def test_override_n_and_beta(self):
+        solver = EmpiricalSolver(self.mesh, self.material,
+                                  power_law_n={'compression': 4.0},
+                                  linear_beta={'shear': 6.0})
+        assert abs(solver.POWER_LAW_N['compression'] - 4.0) < 1e-12
+        assert abs(solver.LINEAR_BETA['shear'] - 6.0) < 1e-12
+
+    def test_override_negative_alpha_rejected(self):
+        with pytest.raises(ValueError, match=r"positive finite"):
+            EmpiricalSolver(self.mesh, self.material,
+                            judd_wright_alpha={'compression': -1.0})
+
+    def test_override_nan_alpha_rejected(self):
+        with pytest.raises(ValueError, match=r"positive finite"):
+            EmpiricalSolver(self.mesh, self.material,
+                            judd_wright_alpha={'compression': float('nan')})
+
+    def test_override_unknown_mode_rejected(self):
+        with pytest.raises(ValueError, match=r"unknown mode keys"):
+            EmpiricalSolver(self.mesh, self.material,
+                            judd_wright_alpha={'silly_mode': 5.0})
+
+    def test_override_non_dict_rejected(self):
+        with pytest.raises(TypeError, match=r"dict mapping mode"):
+            EmpiricalSolver(self.mesh, self.material,
+                            judd_wright_alpha=[6.9, 3.9, 8.0, 10.0])
+
+    def test_override_does_not_mutate_class_defaults(self):
+        """Overrides must not leak back into the class-level QI dicts."""
+        EmpiricalSolver(self.mesh, self.material,
+                        judd_wright_alpha={'ilss': 99.0})
+        assert EmpiricalSolver._JUDD_WRIGHT_ALPHA_QI['ilss'] == 10.0
 
     def test_get_all_failure_loads(self):
         results = self.solver.get_all_failure_loads()
@@ -501,9 +666,13 @@ class TestAnalysisPipeline:
         path = str(tmp_path / "test_results.json")
         save_results_to_json(results, path)
         assert os.path.exists(path)
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             data = json.load(f)
         assert 'uniform_spherical' in data
+
+    def test_compare_configurations_unknown_material_raises(self):
+        with pytest.raises(ValueError, match=r"Unknown material"):
+            compare_configurations(0.03, material_name='T800epoxy')
 
 
 class TestIntegration:
@@ -692,6 +861,13 @@ class TestMTEffectiveStiffness:
         assert C_eff.shape == (6, 6)
         assert C_eff[0, 0] < self.C_m[0, 0]
 
+    def test_finite_for_full_Vp_sweep_oblate(self):
+        # Oblate voids near Vp -> 1 are the worst case for MT inversion;
+        # the pinv fallback + finite check should keep all entries finite.
+        for Vp in [0.50, 0.85, 0.95, 0.985]:
+            C_eff = _mt_effective_stiffness(self.C_m, Vp, (3, 3, 0.3), 0.35)
+            assert np.all(np.isfinite(C_eff)), f"non-finite C_eff at Vp={Vp}"
+
 
 class TestHex8Element:
     def setup_method(self):
@@ -717,6 +893,49 @@ class TestHex8Element:
         """Shape functions should sum to 1 at any point."""
         N = Hex8Element.shape_functions(0.3, -0.2, 0.5)
         np.testing.assert_allclose(N.sum(), 1.0, atol=1e-14)
+
+    def test_nan_node_porosities_rejected(self):
+        bad = np.full(8, 0.03)
+        bad[3] = float('nan')
+        with pytest.raises(ValueError, match=r"node_porosities must be finite"):
+            Hex8Element(
+                node_coords=self.node_coords,
+                C_base=self.C_base,
+                ply_angle_deg=0.0,
+                node_porosities=bad,
+                void_shape_radii=(1, 1, 1),
+                nu_m=0.35,
+                C_m=self.C_m,
+            )
+
+    def test_node_porosities_above_one_rejected(self):
+        bad = np.full(8, 0.03)
+        bad[2] = 5.0  # plausibly a percent (5%) → rejected with hint
+        with pytest.raises(ValueError, match=r"node_porosities must be a fraction"):
+            Hex8Element(
+                node_coords=self.node_coords,
+                C_base=self.C_base,
+                ply_angle_deg=0.0,
+                node_porosities=bad,
+                void_shape_radii=(1, 1, 1),
+                nu_m=0.35,
+                C_m=self.C_m,
+            )
+
+    def test_node_porosities_fp_overshoot_clipped(self):
+        # ~1e-12 above 1.0 should be clipped, not rejected.
+        bumped = np.full(8, 1.0)
+        bumped[1] = 1.0 + 5e-13
+        elem = Hex8Element(
+            node_coords=self.node_coords,
+            C_base=self.C_base,
+            ply_angle_deg=0.0,
+            node_porosities=bumped,
+            void_shape_radii=(1, 1, 1),
+            nu_m=0.35,
+            C_m=self.C_m,
+        )
+        assert np.all(elem.node_porosities <= 1.0)
 
     def test_shape_functions_at_nodes(self):
         """N_i should be 1 at node i and 0 at other nodes."""
@@ -1112,7 +1331,7 @@ class TestFEExportResults:
         results = solver.solve(loading='compression', applied_strain=-0.001)
         path = str(tmp_path / "fe_results.json")
         FESolver.export_results(results, path)
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             data = json.load(f)
         assert 'displacement' in data
         assert 'stress_global' in data

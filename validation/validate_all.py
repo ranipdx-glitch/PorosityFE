@@ -280,7 +280,7 @@ def generate_master_report(results: Dict[str, Any], output_dir: str = None):
                 md_lines.append(f"| {ds_name} | {prop} | {r['n_points']} | {r['mae']:.2f} |")
 
     md_path = os.path.join(output_dir, 'validation_detail_report.md')
-    with open(md_path, 'w') as f:
+    with open(md_path, 'w', encoding='utf-8', newline='') as f:
         f.write('\n'.join(md_lines))
 
     return plot_path, md_path
