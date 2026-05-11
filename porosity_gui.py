@@ -16,9 +16,13 @@ from __future__ import annotations
 import csv
 import dataclasses
 import json
+import logging
 import sys
+import threading
 import traceback
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     from PyQt6.QtWidgets import (
@@ -193,10 +197,18 @@ if HAS_PYQT6:
         def __init__(self, config: dict) -> None:
             super().__init__()
             self.config = config
-            self._stop_requested = False
+            # threading.Event has built-in memory-fence semantics; a plain
+            # bool can be missed by the worker if the write hasn't propagated
+            # across cores before the next checkpoint read.
+            self._stop_event = threading.Event()
 
         def request_stop(self) -> None:
-            self._stop_requested = True
+            self._stop_event.set()
+
+        @property
+        def _stop_requested(self) -> bool:
+            """Back-compat accessor for the six checkpoint reads in run()."""
+            return self._stop_event.is_set()
 
         def run(self) -> None:
             try:
@@ -716,13 +728,26 @@ if HAS_PYQT6:
 
         def _on_run(self) -> None:
             """Run the porosity analysis in a background thread."""
+            # Guard against re-entry: a fast double-click on Run could land a
+            # second call while the previous worker is still alive. Without
+            # this guard, the new AnalysisWorker would overwrite self._worker
+            # and the prior thread would be orphaned (request_stop() can only
+            # reach the latest worker).
+            if self._worker is not None and self._worker.isRunning():
+                return
+
+            # Disable the button *before* parsing widgets so a double-click
+            # during _build_config() can't start a second analysis. _build_config
+            # iterates many widgets and can take long enough on slower hardware
+            # for a fast user to click twice.
+            self.run_btn.setEnabled(False)
             try:
                 config = self._build_config()
             except Exception as e:
+                self.run_btn.setEnabled(True)
                 QMessageBox.critical(self, "Configuration Error", str(e))
                 return
 
-            self.run_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
             self.stop_btn.setVisible(True)
             self.statusBar().showMessage("Running analysis...")
@@ -814,10 +839,27 @@ if HAS_PYQT6:
             self._stop_progress()
 
             if self._worker is not None:
-                self._worker.request_stop()
-                if self._worker.isRunning():
-                    self._worker.terminate()
-                    self._worker.wait(2000)
+                worker = self._worker
+                worker.request_stop()
+                if worker.isRunning():
+                    worker.terminate()
+                    worker.wait(2000)
+                    if worker.isRunning():
+                        # terminate() is advisory — if the worker is wedged in
+                        # a C extension (numpy/scipy can sit in BLAS calls), it
+                        # may keep running. Surface this rather than pretending
+                        # the analysis was cleanly stopped.
+                        logger.error(
+                            "AnalysisWorker did not terminate within 2s; "
+                            "thread state remains running."
+                        )
+                        QMessageBox.warning(
+                            self, "Stop Incomplete",
+                            "The analysis worker did not terminate within "
+                            "the 2-second grace period — it may still be "
+                            "consuming CPU. Please restart the application "
+                            "if this keeps happening."
+                        )
                 self._worker = None
 
             self.run_btn.setEnabled(True)
@@ -829,6 +871,24 @@ if HAS_PYQT6:
         def _on_progress(self, msg: str) -> None:
             """Update status bar with progress message."""
             self.statusBar().showMessage(msg)
+
+        def closeEvent(self, event) -> None:
+            """Ensure the worker thread exits before the window closes.
+
+            Without this override, closing the window mid-analysis terminates
+            the QApplication event loop while the QThread keeps running until
+            its solve completes — the Python process keeps consuming CPU
+            even though the UI is gone.
+            """
+            worker = getattr(self, "_worker", None)
+            if worker is not None and worker.isRunning():
+                worker.request_stop()
+                # Give the cooperative checkpoints a chance to fire before
+                # falling back to terminate(). 2s matches _on_stop's grace.
+                if not worker.wait(2000):
+                    worker.terminate()
+                    worker.wait()  # no timeout — must finish before close
+            event.accept()
 
         # ----------------------------------------------------------
         # Results formatting
