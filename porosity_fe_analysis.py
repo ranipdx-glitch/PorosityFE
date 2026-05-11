@@ -2065,6 +2065,14 @@ class Hex8Element:
         """Element stiffness matrix (24x24) via 2x2x2 Gauss quadrature.
 
         Ke = sum over GPs of: B^T @ C_bar @ B * |J| * w
+
+        Raises
+        ------
+        ValueError
+            If the Jacobian determinant is non-positive at any Gauss point —
+            this signals a degenerate or inverted element whose contribution
+            would corrupt the assembled global stiffness with a wrong-sign
+            block. Catching here makes failures legible instead of silent.
         """
         Ke = np.zeros((24, 24))
         for gp_idx in range(len(self._gauss_weights)):
@@ -2074,6 +2082,15 @@ class Hex8Element:
             C_bar = self._degraded_stiffness(xi, eta, zeta)
             J = self.jacobian(xi, eta, zeta)
             detJ = np.linalg.det(J)
+            if not np.isfinite(detJ) or detJ <= 0.0:
+                raise ValueError(
+                    f"Element has non-positive Jacobian determinant "
+                    f"(detJ={detJ!r}) at Gauss point "
+                    f"(xi={xi}, eta={eta}, zeta={zeta}). The element is "
+                    f"degenerate or has inverted node ordering — its "
+                    f"contribution would silently corrupt the assembled "
+                    f"stiffness."
+                )
             with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
                 Ke_contrib = (B.T @ C_bar @ B) * detJ * w
             # Protect against overflow in void elements
@@ -2129,13 +2146,20 @@ class Hex8Element:
 
     @property
     def volume(self) -> float:
-        """Element volume via Gauss quadrature."""
+        """Element volume via Gauss quadrature.
+
+        Uses ``abs(det(J))`` so an inverted-but-otherwise-valid element
+        still reports a sensible (positive) volume. ``stiffness_matrix``
+        rejects inverted elements at assembly time, so the negative-volume
+        case is only reachable via direct ``.volume`` lookup on a degenerate
+        element constructed manually.
+        """
         vol = 0.0
         for gp_idx in range(len(self._gauss_weights)):
             xi, eta, zeta = self._gauss_points[gp_idx]
             w = self._gauss_weights[gp_idx]
             J = self.jacobian(xi, eta, zeta)
-            vol += np.linalg.det(J) * w
+            vol += abs(np.linalg.det(J)) * w
         return float(vol)
 
 
@@ -2633,13 +2657,17 @@ class FESolver:
             stress_global[e] = sig_g
             strain_global[e] = eps_g
 
-            # Transform to local coordinates
+            # Transform to local coordinates. Stress uses T_sigma; engineering
+            # strain (with gamma_ij = 2*eps_ij in slots 3-5) uses T_epsilon —
+            # T_sigma applied to engineering strain leaves the shear components
+            # off by 2x.
             ply_rad = np.radians(float(self.mesh.ply_angles[e]))
-            T_ply = stress_transformation_3d(ply_rad, axis='z')
+            T_sigma = stress_transformation_3d(ply_rad, axis='z')
+            T_eps = strain_transformation_3d(ply_rad, axis='z')
 
             for g in range(n_gp):
-                stress_local[e, g] = T_ply @ sig_g[g]
-                strain_local[e, g] = T_ply @ eps_g[g]
+                stress_local[e, g] = T_sigma @ sig_g[g]
+                strain_local[e, g] = T_eps @ eps_g[g]
 
         # 6. Evaluate Tsai-Wu at each GP
         max_fi = self._evaluate_tsai_wu(stress_local)

@@ -112,8 +112,11 @@ def _check_pyqt6() -> None:
     if not HAS_PYQT6:
         raise ImportError(
             "Porosity FE GUI requires PyQt6. Install with:\n"
+            "  pip install porosity-fe[gui]\n"
+            "Or, if you already have the source checkout:\n"
             "  pip install PyQt6\n"
-            "Or run the analysis script directly: python porosity_fe_analysis.py"
+            "Or run the analysis script directly without the GUI:\n"
+            "  python porosity_fe_analysis.py"
         )
 
 
@@ -1471,5 +1474,20 @@ def launch() -> None:
         sys.exit(app.exec())
 
 
+def _console_main() -> int:
+    """Console-script wrapper around ``launch()``.
+
+    Catches the friendly ``ImportError`` from ``_check_pyqt6()`` and prints
+    it to stderr instead of leaking a Python traceback when a user runs
+    the ``porosity-fe`` command without the ``[gui]`` extra installed.
+    """
+    try:
+        launch()
+    except ImportError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    launch()
+    sys.exit(_console_main())

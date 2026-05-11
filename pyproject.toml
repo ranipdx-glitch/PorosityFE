@@ -53,7 +53,7 @@ Repository = "https://github.com/elhajjar1/PorosityFE"
 Issues = "https://github.com/elhajjar1/PorosityFE/issues"
 
 [project.scripts]
-porosity-fe = "porosity_gui:launch"
+porosity-fe = "porosity_gui:_console_main"
 validate_porosity = "validate_porosity_cli:main"
 
 [tool.setuptools]
