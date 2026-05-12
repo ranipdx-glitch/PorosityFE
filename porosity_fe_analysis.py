@@ -2930,23 +2930,31 @@ class FESolver:
                 F13 = F12
                 F23 = -0.5 * np.sqrt(F22_F33)
 
-            for g in range(n_gp):
-                s = stress_local[e, g]
-                fi = (F1 * s[0] + F2 * s[1] + F3 * s[2] +
-                      F11 * s[0]**2 + F22 * s[1]**2 + F33 * s[2]**2 +
-                      F44 * s[3]**2 + F55 * s[4]**2 + F66 * s[5]**2 +
-                      2 * F12 * s[0] * s[1] + 2 * F13 * s[0] * s[2] +
-                      2 * F23 * s[1] * s[2])
-                if not np.isfinite(fi):
-                    raise ValueError(
-                        f"Tsai-Wu failure index is non-finite at element {e}, "
-                        f"Gauss point {g} (Vp={elem_Vp:.4f}, "
-                        f"stress={s.tolist()}). This usually indicates a "
-                        f"degenerate stiffness or strength matrix; refine the "
-                        f"mesh or check input bounds."
-                    )
-                if fi > max_fi:
-                    max_fi = fi
+            # Vectorize across all Gauss points of this element (#41).
+            # stress_local[e] is shape (n_gp, 6); the Tsai-Wu polynomial is
+            # element-wise, so the inner Gauss loop collapses to a single
+            # numpy expression of length n_gp.
+            s_all = stress_local[e]  # (n_gp, 6)
+            fi_per_gp = (
+                F1 * s_all[:, 0] + F2 * s_all[:, 1] + F3 * s_all[:, 2]
+                + F11 * s_all[:, 0]**2 + F22 * s_all[:, 1]**2 + F33 * s_all[:, 2]**2
+                + F44 * s_all[:, 3]**2 + F55 * s_all[:, 4]**2 + F66 * s_all[:, 5]**2
+                + 2 * F12 * s_all[:, 0] * s_all[:, 1]
+                + 2 * F13 * s_all[:, 0] * s_all[:, 2]
+                + 2 * F23 * s_all[:, 1] * s_all[:, 2]
+            )
+            if not np.all(np.isfinite(fi_per_gp)):
+                bad_g = int(np.argmax(~np.isfinite(fi_per_gp)))
+                raise ValueError(
+                    f"Tsai-Wu failure index is non-finite at element {e}, "
+                    f"Gauss point {bad_g} (Vp={elem_Vp:.4f}, "
+                    f"stress={s_all[bad_g].tolist()}). This usually indicates "
+                    f"a degenerate stiffness or strength matrix; refine the "
+                    f"mesh or check input bounds."
+                )
+            elem_max = float(fi_per_gp.max())
+            if elem_max > max_fi:
+                max_fi = elem_max
 
         return float(max_fi)
 
