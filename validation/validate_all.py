@@ -265,7 +265,10 @@ import matplotlib.pyplot as plt
 def generate_master_report(results: Dict[str, Any], output_dir: str = None):
     """Generate master validation report (PNG plot + Markdown table)."""
     if output_dir is None:
-        output_dir = os.path.dirname(os.path.abspath(__file__))
+        # Default to cwd, not the package directory: when running inside a
+        # PyInstaller-frozen bundle (macOS .app / Windows .exe) the package
+        # path is read-only and writing the PNG/MD there crashes.
+        output_dir = os.getcwd()
 
     by_property = {}
     for ds_name, ds_results in results.items():

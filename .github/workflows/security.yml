@@ -1,0 +1,32 @@
+name: Security audit
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Weekly run so newly-disclosed vulns surface even without a push.
+    - cron: '0 6 * * 1'
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      - name: Audit requirements.txt
+        # Don't fail the workflow on advisories yet — surface them as a
+        # soft signal first; flip to failing (drop `|| true`) once the
+        # noise level is known.
+        run: pip-audit -r requirements.txt --strict || true

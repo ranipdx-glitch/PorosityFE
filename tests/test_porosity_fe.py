@@ -25,6 +25,7 @@ from porosity_fe_analysis import (MaterialProperties, MATERIALS, VoidGeometry, V
                                    strain_transformation_3d, rotate_stiffness_3d,
                                    gauss_points_1d, gauss_points_hex,
                                    Hex8Element, _mt_effective_stiffness,
+                                   _degraded_composite_stiffness,
                                    GlobalAssembler, BoundaryHandler, FESolver, FieldResults,
                                    compute_clt_effective_modulus, check_mesh_quality)
 
@@ -905,6 +906,76 @@ class TestMTEffectiveStiffness:
         assert deg_yy > deg_xx
         # The two equatorial directions are equivalent (axisymmetric).
         assert abs(deg_yy - deg_zz) < 1e-6
+
+
+class TestDegradedCompositeStiffness:
+    """Direct unit tests for _degraded_composite_stiffness (#48).
+
+    Previously exercised only indirectly through Hex8Element._degraded_stiffness;
+    the Vp < 1e-12, Vp > 0.99, and the lame-denominator guard branches were
+    not covered, and past matrix-modulus fixes lived in this function.
+    """
+
+    def setup_method(self):
+        self.mat = MATERIALS['T800_epoxy']
+        self.pristine = self.mat.get_stiffness_matrix()
+
+    def test_vp_zero_returns_pristine(self):
+        C = _degraded_composite_stiffness(0.0, (1, 1, 1), self.mat)
+        np.testing.assert_allclose(C, self.pristine, atol=1e-9)
+
+    def test_vp_subepsilon_returns_pristine(self):
+        # Below the 1e-12 guard: must take the early-return branch.
+        C = _degraded_composite_stiffness(1e-15, (1, 1, 1), self.mat)
+        np.testing.assert_allclose(C, self.pristine, atol=1e-9)
+
+    def test_vp_near_one_returns_zeros(self):
+        # Above the 0.99 guard: collapsed material is fully degraded.
+        C = _degraded_composite_stiffness(0.995, (1, 1, 1), self.mat)
+        np.testing.assert_array_equal(C, np.zeros((6, 6)))
+
+    def test_e11_weakly_affected_e22_g12_strongly(self):
+        # At 5% porosity the fiber-dominated E11 barely moves while the
+        # matrix-dominated E22 and G12 take significant hits. This is the
+        # whole reason this helper exists; if a future refactor inverts
+        # those rates, this test must fail.
+        Vp = 0.05
+        C = _degraded_composite_stiffness(Vp, (1, 1, 1), self.mat)
+        S = np.linalg.inv(C)
+        S_pristine = np.linalg.inv(self.pristine)
+        # Engineering moduli come straight off the compliance diagonal.
+        E11_loss = 1.0 - (1.0 / S[0, 0]) / (1.0 / S_pristine[0, 0])
+        E22_loss = 1.0 - (1.0 / S[1, 1]) / (1.0 / S_pristine[1, 1])
+        G12_loss = 1.0 - (1.0 / S[5, 5]) / (1.0 / S_pristine[5, 5])
+        assert E11_loss < 0.01, f"E11 should be near-pristine, lost {E11_loss:.4f}"
+        assert E22_loss > E11_loss * 5, (
+            f"E22 loss {E22_loss:.4f} should be much larger than E11 loss {E11_loss:.4f}"
+        )
+        assert G12_loss > E11_loss * 5, (
+            f"G12 loss {G12_loss:.4f} should be much larger than E11 loss {E11_loss:.4f}"
+        )
+
+    def test_monotonic_e22_degradation(self):
+        Vp_list = [0.01, 0.03, 0.05, 0.08]
+        E22_seq = []
+        for Vp in Vp_list:
+            C = _degraded_composite_stiffness(Vp, (1, 1, 1), self.mat)
+            S = np.linalg.inv(C)
+            E22_seq.append(1.0 / S[1, 1])
+        for a, b in zip(E22_seq, E22_seq[1:]):
+            assert b < a, f"E22 should drop monotonically with Vp: got {E22_seq}"
+
+    def test_returned_stiffness_positive_definite(self):
+        C = _degraded_composite_stiffness(0.05, (1, 1, 1), self.mat)
+        eig = np.linalg.eigvalsh(C)
+        assert np.all(eig > 0), f"degraded stiffness not positive-definite: {eig}"
+
+    def test_all_finite(self):
+        # Sweep through the regime where the lame-denominator guard
+        # (lam_eff + mu_eff < 1e-12) could trip; outputs must stay finite.
+        for Vp in [1e-10, 0.01, 0.10, 0.50, 0.85, 0.985]:
+            C = _degraded_composite_stiffness(Vp, (1, 1, 1), self.mat)
+            assert np.all(np.isfinite(C)), f"non-finite C at Vp={Vp}"
 
 
 class TestHex8Element:
