@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Tuple, Dict, List, Optional, Union
 import json
@@ -1652,10 +1653,43 @@ _NODE_COORDS_REF = np.array([
 ], dtype=float)
 
 
+# Bounded LRU cache for _mt_effective_stiffness results (#42). The FE stress
+# recovery loop calls this once per (element, Gauss point) with a Vp that
+# only varies element-to-element, so within an element the same key recurs
+# 8x. Across an FE run with a few thousand elements, the number of unique
+# (Vp, shape, nu_m, C_m-fingerprint) tuples is small enough that an LRU of
+# a few thousand entries gives a high hit rate at low memory cost.
+_MT_CACHE_MAXSIZE = 4096
+_mt_cache: 'OrderedDict[tuple, np.ndarray]' = OrderedDict()
+
+
+def _mt_cache_key(C_m: np.ndarray, Vp: float, void_shape_radii: Tuple,
+                  nu_m: float) -> tuple:
+    # An isotropic 6x6 stiffness is fully determined by (lam+2mu, mu); use
+    # both diagonal slots as a content fingerprint so different materials
+    # never collide. Rounding tolerances are tighter than typical FP noise
+    # but loose enough that two physically-identical inputs collapse.
+    return (
+        round(float(Vp), 6),
+        tuple(round(float(r), 6) for r in void_shape_radii),
+        round(float(nu_m), 8),
+        round(float(C_m[0, 0]), 4),
+        round(float(C_m[3, 3]), 4),
+    )
+
+
+def _mt_cache_clear() -> None:
+    """Drop the MT effective-stiffness cache. Test/diagnostic helper."""
+    _mt_cache.clear()
+
+
 def _mt_effective_stiffness(C_m: np.ndarray, Vp: float,
                             void_shape_radii: Tuple,
                             nu_m: float) -> np.ndarray:
     """Mori-Tanaka effective stiffness for void inclusions (C_inclusion = 0).
+
+    Memoized by a content-fingerprint cache (#42). The cached result is
+    copied before return so callers can mutate it freely.
 
     Standalone Eshelby-tensor-based Mori-Tanaka calculation for use inside
     Hex8Element.
@@ -1687,6 +1721,14 @@ def _mt_effective_stiffness(C_m: np.ndarray, Vp: float,
         return C_m.copy()
     if Vp > 0.99:
         return np.zeros((6, 6))
+
+    # Cache check (#42). The compute path below is ~200x more expensive
+    # than the fingerprint+lookup, so the hit case is essentially free.
+    cache_key = _mt_cache_key(C_m, Vp, void_shape_radii, nu_m)
+    cached = _mt_cache.get(cache_key)
+    if cached is not None:
+        _mt_cache.move_to_end(cache_key)  # LRU touch
+        return cached.copy()
 
     nu = nu_m
     r = list(void_shape_radii)
@@ -1779,8 +1821,16 @@ def _mt_effective_stiffness(C_m: np.ndarray, Vp: float,
     C_eff = C_m @ (I6 - Vp * inner_inv)
     if not np.all(np.isfinite(C_eff)):
         # Last-ditch: return the void-saturated zero stiffness rather than
-        # silently emitting NaN/inf from a near-singular inner.
+        # silently emitting NaN/inf from a near-singular inner. Skip the
+        # cache for this path — it's a defensive fallback, not a result
+        # we want to look up later.
         return np.zeros((6, 6))
+
+    # Store in the LRU cache (#42); evict the oldest entry if full. Cache
+    # a defensive copy so callers can mutate the returned array.
+    _mt_cache[cache_key] = C_eff.copy()
+    if len(_mt_cache) > _MT_CACHE_MAXSIZE:
+        _mt_cache.popitem(last=False)
     return C_eff
 
 

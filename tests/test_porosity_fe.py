@@ -969,6 +969,43 @@ class TestMTEffectiveStiffness:
         # The two equatorial directions are equivalent (axisymmetric).
         assert abs(deg_yy - deg_zz) < 1e-6
 
+    def test_cache_hit_returns_identical_result(self):
+        # #42: a repeated call with the same key must come from the cache
+        # and return a numerically identical result (within fp tolerance
+        # of the original computation, which here is exact equality since
+        # the cache stores the actual array).
+        from porosity_fe_analysis import _mt_cache, _mt_cache_clear
+        _mt_cache_clear()
+        first = _mt_effective_stiffness(self.C_m, 0.04, (1, 1, 1), 0.35)
+        assert len(_mt_cache) == 1
+        second = _mt_effective_stiffness(self.C_m, 0.04, (1, 1, 1), 0.35)
+        # Still one entry — no duplication.
+        assert len(_mt_cache) == 1
+        np.testing.assert_array_equal(first, second)
+
+    def test_cache_returns_defensive_copy(self):
+        # Callers may mutate the returned array (e.g. callers in the FE
+        # path build derived ratios). The cache must not be poisoned by
+        # that mutation — the next call must still return the original.
+        from porosity_fe_analysis import _mt_cache_clear
+        _mt_cache_clear()
+        first = _mt_effective_stiffness(self.C_m, 0.04, (1, 1, 1), 0.35)
+        first[0, 0] = -999.0  # mutate the returned array
+        second = _mt_effective_stiffness(self.C_m, 0.04, (1, 1, 1), 0.35)
+        assert second[0, 0] != -999.0
+
+    def test_cache_distinguishes_materials(self):
+        # Two materials with different C_m[0,0] must NOT collide in the
+        # cache even at identical (Vp, shape, nu_m).
+        from porosity_fe_analysis import _mt_cache, _mt_cache_clear
+        _mt_cache_clear()
+        C_m2 = self.C_m * 2.0  # different fingerprint
+        a = _mt_effective_stiffness(self.C_m, 0.04, (1, 1, 1), 0.35)
+        b = _mt_effective_stiffness(C_m2, 0.04, (1, 1, 1), 0.35)
+        assert len(_mt_cache) == 2
+        # The stiffer matrix should give a stiffer effective stiffness.
+        assert b[0, 0] > a[0, 0]
+
 
 class TestDegradedCompositeStiffness:
     """Direct unit tests for _degraded_composite_stiffness (#48).
