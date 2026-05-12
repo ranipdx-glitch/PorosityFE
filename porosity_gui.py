@@ -157,8 +157,16 @@ def build_export_payload(result: dict) -> dict:
 
 
 def write_results_json(filepath: str, payload: dict) -> None:
+    # Prepend the schema envelope (#20) while keeping the payload keys
+    # flat at the top level for backward compatibility.
+    from porosity_fe_analysis import JSON_SCHEMA_VERSION, FORMAT_EMPIRICAL_SWEEP
+    envelope = {
+        "schema_version": JSON_SCHEMA_VERSION,
+        "format": FORMAT_EMPIRICAL_SWEEP,
+        **payload,
+    }
     with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(envelope, f, indent=2)
 
 
 def write_results_csv(filepath: str, payload: dict) -> None:
@@ -225,6 +233,11 @@ if HAS_PYQT6:
 
                 # --- Material ---
                 self.progress.emit("Setting up material and laminate...")
+                if cfg["material_name"] not in MATERIALS:
+                    raise ValueError(
+                        f"Unknown material {cfg['material_name']!r}. "
+                        f"Available presets: {sorted(MATERIALS)}."
+                    )
                 material = MATERIALS[cfg["material_name"]]
                 material = dataclasses.replace(
                     material,

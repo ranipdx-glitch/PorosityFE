@@ -967,9 +967,20 @@ class EmpiricalSolver:
         return kd
 
     def apply_loading(self, mode: str = 'compression', model: str = 'judd_wright'):
-        model_func = {'judd_wright': self._judd_wright,
-                      'power_law': self._power_law,
-                      'linear': self._linear}[model]
+        _MODEL_FUNCS = {'judd_wright': self._judd_wright,
+                        'power_law': self._power_law,
+                        'linear': self._linear}
+        if model not in _MODEL_FUNCS:
+            raise ValueError(
+                f"Unknown knockdown model {model!r}. "
+                f"Use one of {sorted(_MODEL_FUNCS)}."
+            )
+        if mode not in self.PRISTINE_STRENGTH_KEY:
+            raise ValueError(
+                f"Unknown loading mode {mode!r}. "
+                f"Use one of {sorted(self.PRISTINE_STRENGTH_KEY)}."
+            )
+        model_func = _MODEL_FUNCS[model]
         kd = np.array([model_func(Vp, mode) for Vp in self.mesh.porosity])
         kd = self._apply_discrete_void_scf(kd, mode)
         self.nodal_knockdown = kd
@@ -2942,6 +2953,13 @@ class FESolver:
             },
         }
 
+        # Prepend the schema envelope (#20) while keeping the existing
+        # top-level keys flat for backward compatibility.
+        output = {
+            'schema_version': JSON_SCHEMA_VERSION,
+            'format': FORMAT_FE_FIELDS,
+            **output,
+        }
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(output, f, indent=2)
         print(f"Saved FE results: {filename}")
@@ -3005,10 +3023,28 @@ def compare_configurations(void_volume_fraction: float,
     return results
 
 
+# JSON output schema (#20). Bump the major when an incompatible change
+# to the payload structure ships; bump the minor for additive changes.
+JSON_SCHEMA_VERSION = "1.0"
+FORMAT_EMPIRICAL_SWEEP = "porosity-fe.empirical-sweep"
+FORMAT_FE_FIELDS = "porosity-fe.fe-fields"
+_KNOWN_FORMATS = {FORMAT_EMPIRICAL_SWEEP, FORMAT_FE_FIELDS}
+
+
 def save_results_to_json(results: Dict, filename: str):
     """Export numerical results to JSON."""
-    output = {}
+    output = {
+        'schema_version': JSON_SCHEMA_VERSION,
+        'format': FORMAT_EMPIRICAL_SWEEP,
+    }
     for name, data in results.items():
+        if name in ('schema_version', 'format'):
+            # Defensive: a user-named config that collides with envelope
+            # keys would silently overwrite them. Skip with a clear error.
+            raise ValueError(
+                f"Configuration name {name!r} collides with the JSON "
+                f"envelope keys ('schema_version', 'format')."
+            )
         entry = {
             'config': data['config'],
             'void_volume_fraction': float(data['porosity_field'].Vp),
@@ -3027,6 +3063,39 @@ def save_results_to_json(results: Dict, filename: str):
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(output, f, indent=2)
     print(f"Saved: {filename}")
+
+
+def load_results_from_json(filename: str) -> Dict:
+    """Round-trip loader for save_results_to_json / export_results outputs.
+
+    Validates schema_version compatibility and format identifier. Raises
+    ValueError on missing or incompatible envelope so callers don't silently
+    consume the wrong shape.
+    """
+    with open(filename, encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"{filename}: expected a JSON object at the top level.")
+    sv = data.get('schema_version')
+    if sv is None:
+        raise ValueError(
+            f"{filename}: missing 'schema_version'. "
+            f"This file was likely written by a pre-1.0 build of porosity-fe."
+        )
+    major = sv.split('.', 1)[0]
+    expected_major = JSON_SCHEMA_VERSION.split('.', 1)[0]
+    if major != expected_major:
+        raise ValueError(
+            f"{filename}: schema_version {sv} is incompatible with this "
+            f"loader (expects {expected_major}.x)."
+        )
+    fmt = data.get('format')
+    if fmt not in _KNOWN_FORMATS:
+        raise ValueError(
+            f"{filename}: unknown format {fmt!r}. "
+            f"Known formats: {sorted(_KNOWN_FORMATS)}."
+        )
+    return data
 
 
 def main():

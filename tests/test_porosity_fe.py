@@ -598,6 +598,16 @@ class TestEmpiricalSolver:
         # Discrete void should reduce local knockdown near the void
         assert min_kd_with_void < min_kd_no_void
 
+    def test_apply_loading_bad_model_raises_value_error(self):
+        # #22: bad model name should give a ValueError listing the valid
+        # choices, not a bare KeyError.
+        with pytest.raises(ValueError, match=r"Unknown knockdown model 'bogus'"):
+            self.solver.apply_loading(mode='compression', model='bogus')
+
+    def test_apply_loading_bad_mode_raises_value_error(self):
+        with pytest.raises(ValueError, match=r"Unknown loading mode 'bogus'"):
+            self.solver.apply_loading(mode='bogus', model='judd_wright')
+
 
 class TestFEVisualizer:
     def setup_method(self):
@@ -672,6 +682,62 @@ class TestAnalysisPipeline:
     def test_compare_configurations_unknown_material_raises(self):
         with pytest.raises(ValueError, match=r"Unknown material"):
             compare_configurations(0.03, material_name='T800epoxy')
+
+    def test_save_results_writes_schema_envelope(self, tmp_path):
+        # #20: saved files must carry schema_version + format so consumers
+        # can detect version drift.
+        from porosity_fe_analysis import (JSON_SCHEMA_VERSION,
+                                          FORMAT_EMPIRICAL_SWEEP)
+        results = compare_configurations(
+            0.03, configs={'uniform_spherical': POROSITY_CONFIGS['uniform_spherical']})
+        path = str(tmp_path / "envelope.json")
+        save_results_to_json(results, path)
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        assert data['schema_version'] == JSON_SCHEMA_VERSION
+        assert data['format'] == FORMAT_EMPIRICAL_SWEEP
+
+    def test_load_results_from_json_round_trips(self, tmp_path):
+        from porosity_fe_analysis import load_results_from_json
+        results = compare_configurations(
+            0.03, configs={'uniform_spherical': POROSITY_CONFIGS['uniform_spherical']})
+        path = str(tmp_path / "round_trip.json")
+        save_results_to_json(results, path)
+        loaded = load_results_from_json(path)
+        assert 'uniform_spherical' in loaded
+        # Inner payload survives the round trip.
+        assert (loaded['uniform_spherical']['empirical']['compression']
+                ['judd_wright']['knockdown']
+                == results['uniform_spherical']['empirical']['compression']
+                ['judd_wright']['knockdown'])
+
+    def test_load_results_from_json_rejects_missing_envelope(self, tmp_path):
+        from porosity_fe_analysis import load_results_from_json
+        path = tmp_path / "legacy.json"
+        path.write_text(json.dumps({"uniform_spherical": {"empirical": {}}}),
+                        encoding='utf-8')
+        with pytest.raises(ValueError, match=r"missing 'schema_version'"):
+            load_results_from_json(str(path))
+
+    def test_load_results_from_json_rejects_incompatible_major(self, tmp_path):
+        from porosity_fe_analysis import load_results_from_json
+        path = tmp_path / "future.json"
+        path.write_text(json.dumps({
+            "schema_version": "2.0",
+            "format": "porosity-fe.empirical-sweep",
+        }), encoding='utf-8')
+        with pytest.raises(ValueError, match=r"incompatible"):
+            load_results_from_json(str(path))
+
+    def test_load_results_from_json_rejects_unknown_format(self, tmp_path):
+        from porosity_fe_analysis import load_results_from_json
+        path = tmp_path / "wrong-fmt.json"
+        path.write_text(json.dumps({
+            "schema_version": "1.0",
+            "format": "porosity-fe.something-else",
+        }), encoding='utf-8')
+        with pytest.raises(ValueError, match=r"unknown format"):
+            load_results_from_json(str(path))
 
 
 class TestIntegration:
