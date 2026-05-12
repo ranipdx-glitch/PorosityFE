@@ -348,7 +348,11 @@ or in-process via `validation/validate_all.py`.
 | Transverse tensile strength | 3 | 14.5% |
 | Shear modulus (A-matrix CLT) | 1 | 15.4% |
 
-Overall MAE: **7.7%** across 35 (paper, property) pairs.
+Overall MAE:
+- Property-weighted: **7.69%** across 35 (paper, property) pairs (each entry weighted equally — what `validate_porosity` reports as the headline).
+- Point-weighted: **7.03%** across 239 individual (Vp, normalized) data points (each measurement weighted equally — the standard convention in regression-error reporting).
+
+The two aggregations differ because datasets carry very different numbers of points; `validate_porosity` prints both in the run summary.
 
 ## Limitations
 
@@ -372,7 +376,7 @@ If you use PorosityFE in your research, please cite:
   title = {{PorosityFE}: Porosity-Degraded Composite Laminate Analysis},
   year = {2026},
   url = {https://github.com/elhajjar1/PorosityFE},
-  version = {1.0.0}
+  version = {1.2.0}
 }
 ```
 

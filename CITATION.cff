@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
 title: "PorosityFE: Porosity-Degraded Composite Laminate Analysis"
-version: 1.0.0
-date-released: 2026-04-03
+version: 1.2.0
+date-released: 2026-05-11
 url: "https://github.com/elhajjar1/PorosityFE"
 repository-code: "https://github.com/elhajjar1/PorosityFE"
 license: MIT

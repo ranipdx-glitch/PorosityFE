@@ -220,6 +220,34 @@ def test_compute_mae():
     assert abs(mae - expected) < 0.5
 
 
+def test_summarize_mae_returns_both_weightings():
+    """Regression for #36: summary must distinguish property- vs. point-weighted."""
+    from validation.validate_all import summarize_mae
+    # Two papers: paper_A has 1 property with 10 points and MAE 10%;
+    # paper_B has 1 property with 1 point and MAE 0%. Property-weighted
+    # average is 5%; point-weighted average should be (10*10 + 1*0)/11 ≈ 9.09%.
+    fake_results = {
+        'paper_A': {'tensile_strength': {'mae': 10.0, 'n_points': 10}},
+        'paper_B': {'tensile_strength': {'mae': 0.0, 'n_points': 1}},
+    }
+    s = summarize_mae(fake_results)
+    assert abs(s['property_weighted_mae'] - 5.0) < 1e-9
+    assert abs(s['point_weighted_mae'] - (10.0 * 10 + 0.0 * 1) / 11) < 1e-9
+    assert s['n_entries'] == 2
+    assert s['n_points'] == 11
+    assert s['best_mae'] == 0.0
+    assert s['worst_mae'] == 10.0
+
+def test_summarize_mae_handles_empty():
+    from validation.validate_all import summarize_mae
+    import math
+    s = summarize_mae({})
+    assert s['n_entries'] == 0
+    assert s['n_points'] == 0
+    assert math.isnan(s['property_weighted_mae'])
+    assert math.isnan(s['point_weighted_mae'])
+
+
 def test_run_all_produces_per_dataset_mae():
     from validation.validate_all import run_all_datasets
     results = run_all_datasets()

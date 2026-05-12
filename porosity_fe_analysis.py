@@ -1645,6 +1645,13 @@ def _mt_effective_stiffness(C_m: np.ndarray, Vp: float,
     Standalone Eshelby-tensor-based Mori-Tanaka calculation for use inside
     Hex8Element.
 
+    The Eshelby tensor is computed in a canonical frame (symmetry axis along
+    x_1) and then permuted to align with the actual void axis. The previous
+    implementation used ``ar = max/min`` as the aspect ratio, which is
+    always >= 1, leaving the ``else: # Oblate`` branch unreachable — oblate
+    voids (penny shape) were silently routed to the prolate formulas. See
+    issue #32.
+
     Parameters
     ----------
     C_m : np.ndarray
@@ -1666,19 +1673,55 @@ def _mt_effective_stiffness(C_m: np.ndarray, Vp: float,
     if Vp > 0.99:
         return np.zeros((6, 6))
 
-    ar = max(void_shape_radii) / min(void_shape_radii)
     nu = nu_m
+    r = list(void_shape_radii)
+    sphere_tol = 0.01
 
-    # Build Eshelby tensor
     S = np.zeros((6, 6))
-    if abs(ar - 1.0) < 0.01:  # Sphere
+
+    if (max(r) - min(r)) / max(r) < sphere_tol:
+        # All three radii within 1% — treat as sphere.
         S[0, 0] = S[1, 1] = S[2, 2] = (7 - 5 * nu) / (15 * (1 - nu))
         S[0, 1] = S[0, 2] = S[1, 0] = S[1, 2] = S[2, 0] = S[2, 1] = \
             (5 * nu - 1) / (15 * (1 - nu))
         S[3, 3] = S[4, 4] = S[5, 5] = (4 - 5 * nu) / (15 * (1 - nu))
-    elif ar > 1.0:  # Prolate
-        g = ar / (ar**2 - 1)**1.5 * (ar * np.sqrt(ar**2 - 1) - np.arccosh(ar))
-        a2 = ar**2
+    else:
+        # Axisymmetric: find the symmetry axis (the radius that differs
+        # from the other two equal radii).
+        def _close(a, b):
+            return abs(a - b) / max(a, b) < sphere_tol
+
+        if _close(r[1], r[2]):
+            idx_axis = 0  # a_1 is the unique axis
+        elif _close(r[0], r[2]):
+            idx_axis = 1
+        elif _close(r[0], r[1]):
+            idx_axis = 2
+        else:
+            # Triaxial: no axisymmetric closed form. Approximate by
+            # treating the largest axis as the symmetry axis (prolate
+            # fallback). Documented limitation; acceptable because the
+            # default VOID_SHAPES are all axisymmetric.
+            idx_axis = r.index(max(r))
+
+        a_axis = r[idx_axis]
+        a_eq = r[(idx_axis + 1) % 3]  # equatorial radius
+        alpha = a_axis / a_eq
+        a2 = alpha ** 2
+
+        # g-function with correct branch:
+        #   prolate (alpha > 1): cosh-based form
+        #   oblate  (alpha < 1): arccos-based form
+        # The S-tensor formulas below are identical in structure for both;
+        # only the g-function and the sign of (alpha^2 - 1) differ.
+        if alpha > 1.0:
+            g = alpha / (a2 - 1) ** 1.5 * (
+                alpha * np.sqrt(a2 - 1) - np.arccosh(alpha))
+        else:
+            g = alpha / (1 - a2) ** 1.5 * (
+                np.arccos(alpha) - alpha * np.sqrt(1 - a2))
+
+        # Eshelby tensor in canonical frame (symmetry axis along x_1).
         S[0, 0] = (1.0 / (2 * (1 - nu))) * (
             1 - 2 * nu + (3 * a2 - 1) / (a2 - 1) - (1 - 2 * nu + 3 * a2 / (a2 - 1)) * g)
         S[1, 1] = S[2, 2] = (3.0 / (8 * (1 - nu))) * a2 / (a2 - 1) + \
@@ -1694,25 +1737,19 @@ def _mt_effective_stiffness(C_m: np.ndarray, Vp: float,
         S[4, 4] = S[5, 5] = (1.0 / (4 * (1 - nu))) * (
             1 - 2 * nu - (a2 + 1) / (a2 - 1) -
             0.5 * (1 - 2 * nu - 3 * (a2 + 1) / (a2 - 1)) * g)
-    else:  # Oblate
-        p = 1.0 / ar
-        g_ob = p / (p**2 - 1)**1.5 * (np.arccos(1.0 / p) - (1.0 / p) * np.sqrt(1 - 1.0 / p**2))
-        a2 = ar**2
-        S[0, 0] = (1.0 / (2 * (1 - nu))) * (
-            1 - 2 * nu + (3 * a2 - 1) / (a2 - 1) - (1 - 2 * nu + 3 * a2 / (a2 - 1)) * g_ob)
-        S[1, 1] = S[2, 2] = (3.0 / (8 * (1 - nu))) * a2 / (a2 - 1) + \
-            (1.0 / (4 * (1 - nu))) * (1 - 2 * nu - 9.0 / (4 * (a2 - 1))) * g_ob
-        S[0, 1] = S[0, 2] = -(1.0 / (2 * (1 - nu))) * a2 / (a2 - 1) + \
-            (1.0 / (4 * (1 - nu))) * (3 * a2 / (a2 - 1) - (1 - 2 * nu)) * g_ob
-        S[1, 0] = S[2, 0] = -(1.0 / (2 * (1 - nu))) * 1.0 / (a2 - 1) + \
-            (1.0 / (4 * (1 - nu))) * (3.0 / (a2 - 1) - (1 - 2 * nu)) * g_ob
-        S[1, 2] = S[2, 1] = (1.0 / (4 * (1 - nu))) * (
-            a2 / (2 * (a2 - 1)) - (1 - 2 * nu + 3.0 / (4 * (a2 - 1))) * g_ob)
-        S[3, 3] = (1.0 / (4 * (1 - nu))) * (
-            a2 / (2 * (a2 - 1)) + (1 - 2 * nu - 3.0 / (4 * (a2 - 1))) * g_ob)
-        S[4, 4] = S[5, 5] = (1.0 / (4 * (1 - nu))) * (
-            1 - 2 * nu - (a2 + 1) / (a2 - 1) -
-            0.5 * (1 - 2 * nu - 3 * (a2 + 1) / (a2 - 1)) * g_ob)
+
+        # Permute the Voigt tensor to align the symmetry axis with the
+        # actual unique-radius axis. For a swap x_1 <-> x_k the Voigt
+        # permutation is:
+        #   x_1 <-> x_2: [1, 0, 2, 4, 3, 5]
+        #   x_1 <-> x_3: [2, 1, 0, 5, 4, 3]
+        if idx_axis != 0:
+            if idx_axis == 1:
+                perm = [1, 0, 2, 4, 3, 5]
+            else:
+                perm = [2, 1, 0, 5, 4, 3]
+            P = np.eye(6)[perm]
+            S = P @ S @ P.T
 
     I6 = np.eye(6)
     inner = I6 - (1 - Vp) * S

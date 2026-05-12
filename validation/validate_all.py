@@ -170,6 +170,49 @@ def compute_mae(predicted, experimental) -> float:
     return float(np.mean(errs))
 
 
+def summarize_mae(results: Dict[str, Any]) -> Dict[str, float]:
+    """Aggregate per-(paper, property) MAE numbers into overall summary.
+
+    The property-weighted form gives each (paper, property) entry equal
+    weight — this is what the README headline traditionally reports. The
+    point-weighted form weights each individual (Vp, normalized) measurement
+    equally — the more standard convention in regression-error reporting.
+    They typically differ by ~0.5 percentage points because datasets carry
+    very different numbers of points. See issue #36.
+
+    Returns a dict with both numbers, the count of entries, and the
+    individual extremes.
+    """
+    per_entry_mae = []
+    per_entry_npts = []
+    for ds_results in results.values():
+        if 'error' in ds_results:
+            continue
+        for r in ds_results.values():
+            if 'mae' in r and 'n_points' in r:
+                per_entry_mae.append(r['mae'])
+                per_entry_npts.append(r['n_points'])
+    if not per_entry_mae:
+        return {
+            'property_weighted_mae': float('nan'),
+            'point_weighted_mae': float('nan'),
+            'n_entries': 0,
+            'n_points': 0,
+            'best_mae': float('nan'),
+            'worst_mae': float('nan'),
+        }
+    mae_arr = np.asarray(per_entry_mae, dtype=float)
+    npts_arr = np.asarray(per_entry_npts, dtype=float)
+    return {
+        'property_weighted_mae': float(np.mean(mae_arr)),
+        'point_weighted_mae': float(np.average(mae_arr, weights=npts_arr)),
+        'n_entries': int(mae_arr.size),
+        'n_points': int(npts_arr.sum()),
+        'best_mae': float(mae_arr.min()),
+        'worst_mae': float(mae_arr.max()),
+    }
+
+
 import glob
 
 _MODULUS_PROPS = {'tensile_modulus', 'transverse_tensile_modulus',
@@ -265,9 +308,30 @@ def generate_master_report(results: Dict[str, Any], output_dir: str = None):
     plt.savefig(plot_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
 
-    md_lines = ['# Master Validation Report', '',
-                '| Dataset | Property | N points | MAE (%) |',
-                '|---|---|---|---|']
+    md_lines = ['# Master Validation Report', '']
+
+    # Overall MAE summary — report both aggregation forms (#36).
+    summary = summarize_mae(results)
+    if summary['n_entries']:
+        md_lines.extend([
+            '## Overall MAE',
+            '',
+            f"- Property-weighted: **{summary['property_weighted_mae']:.2f}%** "
+            f"(n={summary['n_entries']} paper-property entries)",
+            f"- Point-weighted:    **{summary['point_weighted_mae']:.2f}%** "
+            f"(n={summary['n_points']} individual data points)",
+            '',
+            '_The two aggregations weight datasets differently (entries vs. data points); '
+            'point-weighted is the standard convention in regression-error reporting._',
+            '',
+        ])
+
+    md_lines.extend([
+        '## Per-(dataset, property) breakdown',
+        '',
+        '| Dataset | Property | N points | MAE (%) |',
+        '|---|---|---|---|',
+    ])
     for ds_name, ds_results in sorted(results.items()):
         if 'error' in ds_results:
             md_lines.append(f"| {ds_name} | LOAD ERROR | - | - |")
@@ -291,12 +355,13 @@ if __name__ == "__main__":
     plot, md = generate_master_report(results)
     print(f"Plot: {plot}")
     print(f"Markdown: {md}")
-    total_maes = []
-    for ds_results in results.values():
-        if 'error' in ds_results:
-            continue
-        for r in ds_results.values():
-            if 'mae' in r:
-                total_maes.append(r['mae'])
-    if total_maes:
-        print(f"\nOverall MAE: {np.mean(total_maes):.2f}% (n={len(total_maes)})")
+    summary = summarize_mae(results)
+    if summary['n_entries']:
+        print(
+            f"\nOverall MAE (property-weighted): {summary['property_weighted_mae']:.2f}%  "
+            f"(n={summary['n_entries']} entries)"
+        )
+        print(
+            f"Overall MAE (point-weighted):    {summary['point_weighted_mae']:.2f}%  "
+            f"(n={summary['n_points']} points)"
+        )

@@ -16,6 +16,24 @@ import os
 import sys
 
 
+def _resolve_version() -> str:
+    """Return the package version from importlib.metadata when installed.
+
+    Falls back to a hard-coded string when running from a source checkout
+    that hasn't been pip-installed (e.g. during tests). The hard-coded
+    fallback must be kept in sync with pyproject.toml on each release.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            return version("porosity-fe")
+        except PackageNotFoundError:
+            pass
+    except ImportError:
+        pass
+    return "1.2.0"
+
+
 def _resolve_bundled_datasets_dir() -> str:
     """Return path to the bundled datasets directory.
 
@@ -68,7 +86,8 @@ def main(argv=None) -> int:
         help='Suppress per-dataset progress output',
     )
     parser.add_argument(
-        '--version', action='version', version='validate_porosity 1.0.0',
+        '--version', action='version',
+        version=f'validate_porosity {_resolve_version()}',
     )
     args = parser.parse_args(argv)
 
@@ -79,6 +98,7 @@ def main(argv=None) -> int:
         from validation.validate_all import (
             run_all_datasets,
             generate_master_report,
+            summarize_mae,
         )
     except ImportError as e:
         print(f"ERROR: Cannot import validation module: {e}", file=sys.stderr)
@@ -111,8 +131,6 @@ def main(argv=None) -> int:
                                                   output_dir=args.output_dir)
 
     # Print summary
-    import numpy as np
-    total_maes = []
     n_datasets_ok = 0
     n_datasets_err = 0
     for ds_name, ds_results in results.items():
@@ -122,9 +140,8 @@ def main(argv=None) -> int:
                 print(f"  [ERROR] {ds_name}: {ds_results['error']}")
             continue
         n_datasets_ok += 1
-        for prop, r in ds_results.items():
-            if 'mae' in r:
-                total_maes.append(r['mae'])
+
+    summary = summarize_mae(results)
 
     print()
     print(f"Report: {plot_path}")
@@ -132,11 +149,19 @@ def main(argv=None) -> int:
     print()
     print(f"Datasets processed:  {n_datasets_ok} succeeded, "
           f"{n_datasets_err} failed")
-    if total_maes:
-        print(f"Overall MAE:         {np.mean(total_maes):.2f}% "
-              f"(across {len(total_maes)} property-dataset pairs)")
-        print(f"Best MAE:            {np.min(total_maes):.2f}%")
-        print(f"Worst MAE:           {np.max(total_maes):.2f}%")
+    if summary['n_entries']:
+        print(
+            f"Overall MAE (property-weighted): "
+            f"{summary['property_weighted_mae']:.2f}%  "
+            f"(n={summary['n_entries']} paper-property entries)"
+        )
+        print(
+            f"Overall MAE (point-weighted):    "
+            f"{summary['point_weighted_mae']:.2f}%  "
+            f"(n={summary['n_points']} individual data points)"
+        )
+        print(f"Best MAE:            {summary['best_mae']:.2f}%")
+        print(f"Worst MAE:           {summary['worst_mae']:.2f}%")
 
     return 0
 

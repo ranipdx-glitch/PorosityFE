@@ -112,8 +112,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'Porosity FE Analysis',
         'CFBundleDisplayName': 'Porosity FE Analysis',
-        'CFBundleShortVersionString': '1.0.0',
-        'CFBundleVersion': '1.0.0',
+        'CFBundleShortVersionString': '1.2.0',
+        'CFBundleVersion': '1.2.0',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '10.15',
     },

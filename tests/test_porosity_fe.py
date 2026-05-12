@@ -870,6 +870,42 @@ class TestMTEffectiveStiffness:
             C_eff = _mt_effective_stiffness(self.C_m, Vp, (3, 3, 0.3), 0.35)
             assert np.all(np.isfinite(C_eff)), f"non-finite C_eff at Vp={Vp}"
 
+    def test_penny_void_anisotropy_along_short_axis(self):
+        """Regression for #32. A penny-shaped void (3, 3, 0.3) has its
+        symmetry axis along x_3 (the short axis), so the effective
+        stiffness should show LARGER degradation along the through-disk
+        direction (S[2,2]) than along the in-plane directions (S[0,0],
+        S[1,1]). The old code treated penny as a prolate cylinder along
+        x_1 and degraded the wrong axis."""
+        Vp = 0.05
+        C_eff = _mt_effective_stiffness(self.C_m, Vp, (3, 3, 0.3), 0.35)
+        # Through-thickness (x_3) component degrades more than in-plane (x_1, x_2)
+        deg_xx = (self.C_m[0, 0] - C_eff[0, 0]) / self.C_m[0, 0]
+        deg_yy = (self.C_m[1, 1] - C_eff[1, 1]) / self.C_m[1, 1]
+        deg_zz = (self.C_m[2, 2] - C_eff[2, 2]) / self.C_m[2, 2]
+        assert deg_zz > deg_xx, (
+            f"penny axis degradation {deg_zz:.4f} should exceed in-plane "
+            f"degradation {deg_xx:.4f} (the disk is perpendicular to x_3)"
+        )
+        # The two in-plane components should be approximately equal
+        # (transverse isotropy of an axisymmetric disk).
+        assert abs(deg_xx - deg_yy) < 1e-6
+
+    def test_prolate_cylindrical_anisotropy_transverse_to_long_axis(self):
+        """Regression for #32. (3, 1, 1) is a prolate cylindrical void
+        with its symmetry axis along x_1. Load flows easily along the
+        long axis (the void is thin in cross-section), but transverse
+        load has to bypass a long obstacle — so transverse degradation
+        (deg_yy, deg_zz) should exceed axial degradation (deg_xx)."""
+        Vp = 0.05
+        C_eff = _mt_effective_stiffness(self.C_m, Vp, (3, 1, 1), 0.35)
+        deg_xx = (self.C_m[0, 0] - C_eff[0, 0]) / self.C_m[0, 0]
+        deg_yy = (self.C_m[1, 1] - C_eff[1, 1]) / self.C_m[1, 1]
+        deg_zz = (self.C_m[2, 2] - C_eff[2, 2]) / self.C_m[2, 2]
+        assert deg_yy > deg_xx
+        # The two equatorial directions are equivalent (axisymmetric).
+        assert abs(deg_yy - deg_zz) < 1e-6
+
 
 class TestHex8Element:
     def setup_method(self):
