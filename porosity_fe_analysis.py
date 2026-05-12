@@ -20,6 +20,8 @@ Dependencies:
     pip install numpy scipy matplotlib
 """
 
+import logging
+
 import numpy as np
 import scipy.sparse
 import scipy.sparse.linalg
@@ -30,6 +32,8 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from dataclasses import dataclass, field
 from typing import Tuple, Dict, List, Optional, Union
 import json
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # SECTION 1: MATERIAL PROPERTIES AND CONSTANTS

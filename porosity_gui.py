@@ -345,6 +345,7 @@ if HAS_PYQT6:
                 self.finished.emit(results)
 
             except Exception as e:
+                logger.exception("Analysis worker raised")
                 self.error.emit(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 
@@ -1048,6 +1049,7 @@ if HAS_PYQT6:
 
                 fig.tight_layout()
             except Exception as e:
+                logger.exception("Profile plot failed")
                 ax = fig.add_subplot(111)
                 ax.text(0.5, 0.5, f"Profile plot error:\n{e}",
                         transform=ax.transAxes, ha="center", va="center",
@@ -1162,6 +1164,7 @@ if HAS_PYQT6:
 
                 fig.tight_layout()
             except Exception as e:
+                logger.exception("Mesh plot failed")
                 ax = fig.add_subplot(111)
                 ax.text(0.5, 0.5, f"Mesh plot error:\n{e}",
                         transform=ax.transAxes, ha="center", va="center",
@@ -1251,6 +1254,7 @@ if HAS_PYQT6:
 
                 fig.tight_layout()
             except Exception as e:
+                logger.exception("Results plot failed")
                 ax = fig.add_subplot(111)
                 ax.text(0.5, 0.5, f"Results plot error:\n{e}",
                         transform=ax.transAxes, ha="center", va="center",
@@ -1367,6 +1371,7 @@ if HAS_PYQT6:
                 fig.tight_layout()
 
             except Exception as e:
+                logger.exception("Stress plot failed")
                 ax = fig.add_subplot(111)
                 ax.text(0.5, 0.5, f"Stress plot error:\n{e}",
                         transform=ax.transAxes, ha="center", va="center",
@@ -1442,6 +1447,7 @@ if HAS_PYQT6:
 
                 self.statusBar().showMessage(f"Results exported to {filepath}")
             except Exception as e:
+                logger.exception("Export failed for %s", filepath)
                 QMessageBox.critical(self, "Export Error", str(e))
 
         def _on_about(self) -> None:
