@@ -1083,7 +1083,7 @@ if HAS_PYQT6:
                 Sr = mesh.stiffness_reduction[indices].reshape(mesh.nz + 1, mesh.nx + 1)
 
                 ax = fig.add_subplot(111)
-                im = ax.contourf(X, Z, Sr * 100, levels=20, cmap="RdYlGn",
+                im = ax.contourf(X, Z, Sr * 100, levels=20, cmap="viridis",
                                  vmin=max(0, Sr.min() * 100 - 1), vmax=100)
                 cb = fig.colorbar(im, ax=ax, label="Stiffness Retention (%)")
 

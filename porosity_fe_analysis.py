@@ -37,6 +37,27 @@ import json
 logger = logging.getLogger(__name__)
 
 # ============================================================
+# PLOT STYLE — applied once at import time
+# ============================================================
+
+def _apply_plot_style():
+    """Set shared rcParams for all plots: fonts, DPI, line widths, grid."""
+    import matplotlib
+    matplotlib.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.size': 11,
+        'axes.titlesize': 14,
+        'axes.labelsize': 12,
+        'lines.linewidth': 1.5,
+        'axes.grid': True,
+        'grid.alpha': 0.3,
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight',
+    })
+
+_apply_plot_style()
+
+# ============================================================
 # SECTION 1: MATERIAL PROPERTIES AND CONSTANTS
 # ============================================================
 
@@ -1136,8 +1157,8 @@ class FEVisualizer:
             ax.annotate(str(idx), (c[0] + c[1]*0.3 + 0.05, c[2] + c[1]*0.3 + 0.05),
                        fontsize=10, fontweight='bold')
         ax.set_title('8-Node Hexahedral Element', fontsize=14, fontweight='bold')
-        ax.set_xlabel('x')
-        ax.set_ylabel('z')
+        ax.set_xlabel('x (mm)')
+        ax.set_ylabel('z (mm)')
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
 
@@ -1166,8 +1187,8 @@ class FEVisualizer:
         else:
             kd = mesh.stiffness_reduction[start:end].reshape(ny1, nx1)
 
-        im = ax.contourf(X, Y, kd, levels=20, cmap='RdYlGn')
-        plt.colorbar(im, ax=ax, label='Stiffness Retention')
+        im = ax.contourf(X, Y, kd, levels=20, cmap='viridis')
+        plt.colorbar(im, ax=ax, label='Stiffness Retention (fraction)')
         ax.set_xlabel('x (mm)', fontsize=12)
         ax.set_ylabel('y (mm)', fontsize=12)
         ax.set_title('Stiffness Reduction at Midplane', fontsize=14, fontweight='bold')
@@ -1197,7 +1218,7 @@ class FEVisualizer:
         scf_max = scf['compression']
         field = np.where(dist < 0, 0, 1.0 + (scf_max - 1) * np.exp(-dist / max(void_geometry.radii)))
 
-        im = ax.contourf(X, Y, field, levels=30, cmap='hot_r')
+        im = ax.contourf(X, Y, field, levels=30, cmap='plasma')
         plt.colorbar(im, ax=ax, label='Stress Concentration Factor')
         ax.set_xlabel('x (mm)', fontsize=12)
         ax.set_ylabel('y (mm)', fontsize=12)
