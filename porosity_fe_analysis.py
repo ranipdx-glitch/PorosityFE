@@ -2789,10 +2789,23 @@ class FESolver:
             print(f"Solving system ({self.mesh.n_dof} DOFs)...")
         u = scipy.sparse.linalg.spsolve(K_mod, F_mod)
 
+        # Hygiene checks on the solution vector
+        if not np.isfinite(u).all():
+            raise RuntimeError(
+                "spsolve produced non-finite values (NaN or Inf) in the solution "
+                "vector. Check matrix conditioning and boundary conditions."
+            )
+        _r = K_mod @ u - F_mod
+        _rel_res = np.linalg.norm(_r) / max(np.linalg.norm(F_mod), 1.0)
+        if _rel_res >= 1e-6:
+            raise RuntimeError(
+                f"spsolve residual {_rel_res:.4e} exceeds tolerance 1e-6. "
+                "Check matrix conditioning or penalty factor."
+            )
+
         if verbose:
             t2 = time.perf_counter()
-            residual = np.linalg.norm(K_mod @ u - F_mod)
-            print(f"  Solve time: {t2 - t1:.2f} s, residual: {residual:.4e}")
+            print(f"  Solve time: {t2 - t1:.2f} s, residual: {_rel_res:.4e}")
             t1 = t2
 
         # 5. Recover stresses and strains

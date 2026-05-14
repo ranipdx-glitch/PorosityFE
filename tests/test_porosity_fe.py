@@ -2204,3 +2204,62 @@ class TestPureShearBCs:
                 f"Non-shear stress {label} too large relative to s12: "
                 f"ratio={ratio:.4f} (rms {label}={sigma_i_rms:.2f}, "
                 f"rms s12={sigma_xy_rms:.2f})")
+
+
+class TestHRefinementConvergence:
+    """h-refinement convergence: finer mesh should approach the analytical
+    uniaxial-tension result more closely than the coarser mesh (#18)."""
+
+    def _run_tension(self, nx, ny, nz, applied_strain=0.001):
+        """Build a zero-porosity mesh and solve uniaxial tension.
+
+        Returns the volume-averaged sigma_xx stress at all Gauss points.
+        """
+        material = MATERIALS['T800_epoxy']
+        pf = PorosityField(material, void_volume_fraction=0.0, distribution='uniform')
+        mesh = CompositeMesh(pf, material, nx=nx, ny=ny, nz=nz)
+        solver = FESolver(mesh, material, pf)
+        results = solver.solve(loading='tension', applied_strain=applied_strain)
+        # Average sigma_xx across all elements and Gauss points
+        avg_sigma_xx = float(np.mean(results.stress_global[:, :, 0]))
+        return avg_sigma_xx
+
+    def test_h_refinement_monotone_convergence(self):
+        """Refining the mesh from 2x2x2 to 4x4x4 elements should produce a
+        sigma_xx that is closer to the analytical value, OR the two mesh
+        densities agree to within a tightening tolerance (monotone convergence).
+
+        Analytical uniaxial tension for an all-0-degree ply laminate:
+          sigma_xx_analytic ≈ E11 * applied_strain  (simplified, ignores
+          lateral coupling), which serves as an upper-bound reference.
+        """
+        applied_strain = 0.001
+        material = MATERIALS['T800_epoxy']
+
+        # Coarse mesh: 2x2x2 hex elements
+        sigma_coarse = self._run_tension(nx=2, ny=2, nz=2,
+                                         applied_strain=applied_strain)
+
+        # Fine mesh: 4x4x4 hex elements
+        sigma_fine = self._run_tension(nx=4, ny=4, nz=4,
+                                       applied_strain=applied_strain)
+
+        # Analytical reference: sigma_xx ~ C11 * eps_xx for uniaxial tension
+        # with all-0-degree plies.  C11 from the material stiffness matrix.
+        C = material.get_stiffness_matrix()
+        sigma_analytic = float(C[0, 0]) * applied_strain
+
+        err_coarse = abs(sigma_coarse - sigma_analytic)
+        err_fine = abs(sigma_fine - sigma_analytic)
+
+        # The fine mesh must be at least as accurate as the coarse mesh,
+        # OR the difference between the two meshes must be small relative
+        # to the magnitude (monotone convergence guard).
+        mesh_diff = abs(sigma_fine - sigma_coarse)
+        relative_diff = mesh_diff / max(abs(sigma_analytic), 1.0)
+
+        assert err_fine <= err_coarse or relative_diff < 0.05, (
+            f"h-refinement did not converge monotonically: "
+            f"coarse err={err_coarse:.4e}, fine err={err_fine:.4e}, "
+            f"mesh-to-mesh diff={mesh_diff:.4e} ({relative_diff*100:.2f}%)"
+        )
