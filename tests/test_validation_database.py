@@ -275,3 +275,134 @@ def test_liu_2006_validation_matches_existing():
     assert 'ilss' in liu
     # Historical Liu ILSS MAE was ~1.8%
     assert liu['ilss']['mae'] < 5.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #34 — Unknown material mapping fires a UserWarning
+# ---------------------------------------------------------------------------
+
+def test_resolve_material_warns_on_unknown_fiber_matrix():
+    """Unknown (fiber, matrix) should emit a UserWarning with the missing key
+    and fall back to the default preset rather than silently proceeding."""
+    import warnings
+    from validation.validate_all import resolve_material
+
+    dataset = {
+        'reference': 'fake_unknown_2099',
+        'material': {
+            'fiber': 'UnknownFiberXYZ',
+            'matrix': 'UnknownMatrixABC',
+            'fiber_volume_fraction': 0.55,
+            'n_plies': 8,
+        }
+    }
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        mat = resolve_material(dataset)
+        # At least one UserWarning should have been raised
+        user_warnings = [x for x in w if issubclass(x.category, UserWarning)]
+        assert len(user_warnings) >= 1, (
+            "Expected a UserWarning for unknown (fiber, matrix) but got none"
+        )
+        msg = str(user_warnings[0].message)
+        assert 'UnknownFiberXYZ' in msg, f"Warning did not mention fiber: {msg}"
+        assert 'UnknownMatrixABC' in msg, f"Warning did not mention matrix: {msg}"
+        assert 'fake_unknown_2099' in msg, f"Warning did not mention dataset name: {msg}"
+
+    # Fallback should still return a valid MaterialProperties object
+    assert mat is not None
+    assert mat.n_plies == 8
+    assert abs(mat.fiber_volume_fraction - 0.55) < 1e-6
+
+
+def test_resolve_material_strict_raises_on_unknown():
+    """strict=True should raise KeyError instead of warning and falling back."""
+    from validation.validate_all import resolve_material
+
+    dataset = {
+        'reference': 'strict_test_dataset',
+        'material': {
+            'fiber': 'UnknownFiberXYZ',
+            'matrix': 'UnknownMatrixABC',
+            'fiber_volume_fraction': 0.55,
+            'n_plies': 8,
+        }
+    }
+
+    import pytest
+    with pytest.raises(KeyError, match='UnknownFiberXYZ'):
+        resolve_material(dataset, strict=True)
+
+
+def test_resolve_material_no_warning_for_known_fiber_matrix():
+    """Known (fiber, matrix) combinations must NOT emit any warning."""
+    import warnings
+    from validation.validate_all import resolve_material
+
+    dataset = {
+        'reference': 'known_material_test',
+        'material': {
+            'fiber': 'T700',
+            'matrix': 'TDE85 epoxy',
+            'fiber_volume_fraction': 0.60,
+            'n_plies': 10,
+        }
+    }
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        resolve_material(dataset)
+        user_warnings = [x for x in w if issubclass(x.category, UserWarning)]
+        assert len(user_warnings) == 0, (
+            f"Unexpected UserWarning for known material: {[str(x.message) for x in user_warnings]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Issue #35 — transverse_tensile_strength is skipped, not misrouted
+# ---------------------------------------------------------------------------
+
+def test_transverse_tensile_strength_is_skipped_in_run_all():
+    """Datasets with transverse_tensile_strength should show 'skipped' rather
+    than a spurious MAE computed via the wrong (longitudinal) failure mode."""
+    from validation.validate_all import run_all_datasets
+    results = run_all_datasets()
+
+    datasets_with_transverse = ['zhang_peek_2025', 'liu_2018', 'stamopoulos_2016']
+    for ds_name in datasets_with_transverse:
+        if ds_name not in results:
+            continue  # dataset might not be present in all environments
+        ds = results[ds_name]
+        if 'transverse_tensile_strength' not in ds:
+            continue
+        entry = ds['transverse_tensile_strength']
+        assert 'skipped' in entry, (
+            f"Expected 'skipped' for {ds_name}/transverse_tensile_strength "
+            f"but got: {entry}"
+        )
+        assert 'mae' not in entry, (
+            f"transverse_tensile_strength for {ds_name} should not have an MAE "
+            "(would be computed via wrong physics)"
+        )
+
+
+def test_predict_strength_raises_for_transverse_tensile():
+    """predict_strength should raise ValueError for transverse_tensile_strength."""
+    import pytest
+    from validation.validate_all import predict_strength
+
+    dataset = {
+        'reference': 'transverse_test',
+        'material': {
+            'fiber': 'T700',
+            'matrix': 'TDE85 epoxy',
+            'fiber_volume_fraction': 0.60,
+            'n_plies': 12,
+            'ply_angles': [0, 90, 0, 90, 0, 90, 90, 0, 90, 0, 90, 0],
+        },
+        'baseline_porosity_pct': 0.0,
+    }
+
+    with pytest.raises(ValueError, match='transverse_tensile_strength'):
+        predict_strength(dataset, 'transverse_tensile_strength', [1.0, 2.0, 3.0])

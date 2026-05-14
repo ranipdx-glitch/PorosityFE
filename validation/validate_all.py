@@ -5,7 +5,10 @@ import json
 import logging
 import os
 import sys
+import warnings
 from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -68,14 +71,40 @@ _FIBER_MATRIX_TO_PRESET = {
 }
 
 
-def resolve_material(dataset: Dict[str, Any]) -> MaterialProperties:
+def resolve_material(dataset: Dict[str, Any], strict: bool = False) -> MaterialProperties:
     """Build a MaterialProperties instance from a dataset's material block.
 
     Selects the closest preset from MATERIALS based on fiber/matrix, then
     overrides n_plies and fiber_volume_fraction from the dataset.
+
+    Parameters
+    ----------
+    dataset:
+        A validated dataset dict containing a ``'material'`` block.
+    strict:
+        If ``True``, raise a ``KeyError`` when the (fiber, matrix) pair is not
+        found in ``_FIBER_MATRIX_TO_PRESET`` instead of falling back to the
+        default preset.  Useful for CI checks that want to catch new materials
+        that have not yet been mapped.
+
+    Raises
+    ------
+    KeyError
+        Only when *strict* is ``True`` and the (fiber, matrix) key is absent.
     """
     m = dataset['material']
     key = (m['fiber'], m['matrix'])
+    dataset_name = dataset.get('reference', str(key))
+    if key not in _FIBER_MATRIX_TO_PRESET:
+        msg = (
+            f"Unknown (fiber, matrix) combination {key!r} in dataset "
+            f"{dataset_name!r}; falling back to default preset 'T700_epoxy'. "
+            "Add this combination to _FIBER_MATRIX_TO_PRESET to silence this warning."
+        )
+        if strict:
+            raise KeyError(msg)
+        warnings.warn(msg, UserWarning, stacklevel=2)
+        logger.warning(msg)
     preset_name = _FIBER_MATRIX_TO_PRESET.get(key, 'T700_epoxy')
     base = MATERIALS[preset_name]
     return dataclasses.replace(
@@ -93,10 +122,21 @@ from porosity_fe_analysis import (
 _PROPERTY_TO_MODE = {
     'compression_strength': 'compression',
     'tensile_strength': 'tension',
-    'transverse_tensile_strength': 'tension',
+    # 'transverse_tensile_strength' is intentionally excluded: EmpiricalSolver
+    # supports only longitudinal modes ('tension', 'compression', 'shear',
+    # 'ilss').  Routing a transverse property to the longitudinal 'tension' mode
+    # produces physically incorrect alpha/n coefficients (fiber-dominated vs.
+    # matrix-dominated failure).  Until a calibrated 'transverse_tension' mode
+    # is added to EmpiricalSolver, transverse_tensile_strength is skipped in
+    # MAE calculations.  See GitHub issue #35.
     'shear_strength': 'shear',
     'ilss': 'ilss',
 }
+
+# Properties that cannot currently be predicted by EmpiricalSolver due to
+# missing calibrated failure modes.  They are skipped with a logged warning
+# rather than silently misrouted to the wrong physics.
+_UNSUPPORTED_STRENGTH_PROPS = {'transverse_tensile_strength'}
 
 
 def predict_strength(dataset: Dict[str, Any], prop_key: str,
@@ -104,7 +144,24 @@ def predict_strength(dataset: Dict[str, Any], prop_key: str,
     """Predict normalized strength at each porosity level via Judd-Wright.
 
     Renormalized to the dataset's baseline_porosity_pct.
+
+    Raises
+    ------
+    ValueError
+        If *prop_key* is in ``_UNSUPPORTED_STRENGTH_PROPS`` (e.g.
+        ``'transverse_tensile_strength'``), because EmpiricalSolver has no
+        calibrated failure mode for it and silently misrouting it would yield
+        incorrect physics.  The caller (``run_all_datasets``) logs a warning and
+        records an error entry instead of raising to the user.
     """
+    if prop_key in _UNSUPPORTED_STRENGTH_PROPS:
+        msg = (
+            f"Property '{prop_key}' is not supported by EmpiricalSolver: no "
+            "calibrated transverse failure mode exists.  Skipping MAE calculation "
+            "to avoid physically incorrect predictions.  See issue #35."
+        )
+        logger.warning(msg)
+        raise ValueError(msg)
     mat = resolve_material(dataset)
     ply_angles = dataset['material']['ply_angles']
     mode = _PROPERTY_TO_MODE[prop_key]
@@ -242,6 +299,14 @@ def run_all_datasets(datasets_dir: str = None) -> Dict[str, Any]:
         for prop_key, prop_data in data['properties'].items():
             vp = prop_data['void_content_pct']
             exp = prop_data['normalized_values']
+            if prop_key in _UNSUPPORTED_STRENGTH_PROPS:
+                skip_msg = (
+                    f"Skipping '{prop_key}' for dataset '{name}': no calibrated "
+                    "EmpiricalSolver mode available (see issue #35)."
+                )
+                logger.warning(skip_msg)
+                dataset_results[prop_key] = {'skipped': skip_msg}
+                continue
             try:
                 if prop_key in _MODULUS_PROPS:
                     pred = predict_modulus(data, prop_key, vp)
@@ -284,7 +349,7 @@ def generate_master_report(results: Dict[str, Any], output_dir: str = None):
         if 'error' in ds_results:
             continue
         for prop, prop_result in ds_results.items():
-            if 'error' in prop_result:
+            if 'error' in prop_result or 'skipped' in prop_result:
                 continue
             by_property.setdefault(prop, []).append({
                 'dataset': ds_name,
@@ -350,7 +415,9 @@ def generate_master_report(results: Dict[str, Any], output_dir: str = None):
             continue
         for prop in sorted(ds_results.keys()):
             r = ds_results[prop]
-            if 'error' in r:
+            if 'skipped' in r:
+                md_lines.append(f"| {ds_name} | {prop} | - | SKIPPED (no model) |")
+            elif 'error' in r:
                 md_lines.append(f"| {ds_name} | {prop} | - | ERROR |")
             else:
                 md_lines.append(f"| {ds_name} | {prop} | {r['n_points']} | {r['mae']:.2f} |")

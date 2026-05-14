@@ -16,7 +16,7 @@
 | liu_2018 | tensile_modulus | 6 | 0.86 |
 | liu_2018 | tensile_strength | 6 | 5.26 |
 | liu_2018 | transverse_tensile_modulus | 6 | 3.29 |
-| liu_2018 | transverse_tensile_strength | 6 | 15.12 |
+| liu_2018 | transverse_tensile_strength | - | SKIPPED (no model) |
 | olivier_1995 | flexural_modulus | 6 | 10.55 |
 | olivier_1995 | ilss | 6 | 1.55 |
 | olivier_1995 | tensile_strength | 6 | 15.67 |
@@ -25,7 +25,7 @@
 | stamopoulos_2016 | shear_modulus | 4 | 15.39 |
 | stamopoulos_2016 | shear_strength | 4 | 4.35 |
 | stamopoulos_2016 | transverse_tensile_modulus | 4 | 1.02 |
-| stamopoulos_2016 | transverse_tensile_strength | 4 | 5.41 |
+| stamopoulos_2016 | transverse_tensile_strength | - | SKIPPED (no model) |
 | tang_1987 | flexural_modulus | 5 | 7.93 |
 | tang_1987 | ilss | 5 | 8.37 |
 | tang_1987 | tensile_strength | 5 | 10.92 |
@@ -36,4 +36,4 @@
 | wen_2023 | shear_strength | 5 | 22.64 |
 | wen_2023 | tensile_strength | 5 | 6.58 |
 | zhang_peek_2025 | transverse_tensile_modulus | 5 | 5.96 |
-| zhang_peek_2025 | transverse_tensile_strength | 5 | 22.86 |
+| zhang_peek_2025 | transverse_tensile_strength | - | SKIPPED (no model) |
