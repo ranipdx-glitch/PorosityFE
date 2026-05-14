@@ -2091,3 +2091,116 @@ class TestKeCacheKeyGeometry:
         assert key1 == key2, (
             "Translated copies of the same element shape should share the geometry key"
         )
+
+
+# ============================================================
+# Issue #39: pure-shear BC fix — G12 recovery test
+# ============================================================
+
+
+class TestPureShearBCs:
+    """Verify that shear_bcs imposes true pure shear and recovers G12 correctly.
+
+    An isotropic material (E11=E22=E33, G12=E/(2*(1+nu))) is used so that
+    the analytical shear modulus is known exactly.  The FE-recovered G12 is
+    computed as:
+
+        G12_fe = mean(sigma_xy) / gamma
+
+    where gamma = applied_strain (engineering shear strain) and sigma_xy is
+    the volume-average Voigt component index 5 (1-indexed: [0]=s11, [1]=s22,
+    [2]=s33, [3]=s23, [4]=s13, [5]=s12).
+    """
+
+    @staticmethod
+    def _make_isotropic_material(E: float = 10000.0, nu: float = 0.30) -> 'MaterialProperties':
+        """Return a MaterialProperties that behaves as an isotropic solid."""
+        G = E / (2.0 * (1.0 + nu))
+        return MaterialProperties(
+            E11=E, E22=E, E33=E,
+            G12=G, G13=G, G23=G,
+            nu12=nu, nu13=nu, nu23=nu,
+            sigma_1c=1e6, sigma_1t=1e6,
+            sigma_2t=1e6, sigma_2c=1e6,
+            tau_12=1e6, tau_ilss=1e6,
+            t_ply=0.5, n_plies=4,
+            matrix_modulus=E, matrix_poisson=nu,
+            fiber_modulus=E, fiber_volume_fraction=0.6,
+        )
+
+    def test_shear_bcs_prescribes_all_four_faces(self):
+        """After the fix, all four side faces must carry prescribed displacements."""
+        mat = self._make_isotropic_material()
+        pf = PorosityField(mat, 0.0, distribution='uniform')
+        mesh = CompositeMesh(pf, mat, nx=2, ny=2, nz=2)
+        handler = BoundaryHandler(mesh)
+
+        gamma = 0.01
+        constrained, F = handler.shear_bcs(applied_strain=gamma)
+
+        nodes = mesh.nodes
+        # Every node on any of the four side faces must have ux and uy prescribed.
+        for face in ('x_min', 'x_max', 'y_min', 'y_max'):
+            for nid in mesh.nodes_on_face(face):
+                nid = int(nid)
+                assert 3 * nid in constrained, (
+                    f"ux not prescribed for node {nid} on face {face}")
+                assert 3 * nid + 1 in constrained, (
+                    f"uy not prescribed for node {nid} on face {face}")
+                x_n = float(nodes[nid, 0])
+                y_n = float(nodes[nid, 1])
+                np.testing.assert_allclose(
+                    constrained[3 * nid], (gamma / 2.0) * y_n, atol=1e-12,
+                    err_msg=f"ux wrong for node {nid} on {face}")
+                np.testing.assert_allclose(
+                    constrained[3 * nid + 1], (gamma / 2.0) * x_n, atol=1e-12,
+                    err_msg=f"uy wrong for node {nid} on {face}")
+
+    def test_recovered_G12_matches_analytical(self):
+        """FE-recovered G12 must match E/(2*(1+nu)) within 2 %."""
+        E = 10000.0
+        nu = 0.30
+        G_analytical = E / (2.0 * (1.0 + nu))
+
+        mat = self._make_isotropic_material(E=E, nu=nu)
+        pf = PorosityField(mat, 0.0, distribution='uniform')
+        # 4x4x4 gives 64 elements — coarse but sufficient for a homogeneous cube
+        mesh = CompositeMesh(pf, mat, nx=4, ny=4, nz=4)
+        solver = FESolver(mesh, mat, pf)
+
+        gamma = 0.01
+        results = solver.solve(loading='shear', applied_strain=gamma)
+
+        # Volume-average sigma_xy (Voigt index 5, 0-based)
+        sigma_xy_mean = float(np.mean(results.stress_global[:, :, 5]))
+        G12_fe = sigma_xy_mean / gamma
+
+        rel_err = abs(G12_fe - G_analytical) / G_analytical
+        assert rel_err < 0.02, (
+            f"G12 recovery failed: G12_fe={G12_fe:.1f}, "
+            f"G_analytical={G_analytical:.1f}, rel_err={rel_err:.4f}")
+
+    def test_shear_only_stress_state(self):
+        """Normal stresses must be negligible compared with shear stress."""
+        E = 10000.0
+        nu = 0.30
+
+        mat = self._make_isotropic_material(E=E, nu=nu)
+        pf = PorosityField(mat, 0.0, distribution='uniform')
+        mesh = CompositeMesh(pf, mat, nx=4, ny=4, nz=4)
+        solver = FESolver(mesh, mat, pf)
+
+        gamma = 0.01
+        results = solver.solve(loading='shear', applied_strain=gamma)
+
+        # indices: 0=s11, 1=s22, 2=s33, 3=s23, 4=s13, 5=s12
+        sigma = results.stress_global  # shape (n_elem, n_gp, 6)
+
+        sigma_xy_rms = float(np.sqrt(np.mean(sigma[:, :, 5] ** 2)))
+        for i, label in enumerate(['s11', 's22', 's33', 's23', 's13']):
+            sigma_i_rms = float(np.sqrt(np.mean(sigma[:, :, i] ** 2)))
+            ratio = sigma_i_rms / sigma_xy_rms if sigma_xy_rms > 0 else 0.0
+            assert ratio < 0.05, (
+                f"Non-shear stress {label} too large relative to s12: "
+                f"ratio={ratio:.4f} (rms {label}={sigma_i_rms:.2f}, "
+                f"rms s12={sigma_xy_rms:.2f})")

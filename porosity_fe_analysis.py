@@ -2551,28 +2551,56 @@ class BoundaryHandler:
 
     def shear_bcs(self, applied_strain: float = 0.01
                   ) -> Tuple[Dict[int, float], np.ndarray]:
-        """Simple shear boundary conditions.
+        """Pure shear boundary conditions for engineering shear strain gamma_12.
 
-        - x_min: ux = uy = 0
-        - x_max: uy = applied_strain * Lx
-        - one corner fixed in z
+        Prescribes the deformation field consistent with pure shear on ALL four
+        side faces (±x and ±y) so that no spurious bending or traction-free
+        condition biases the computed shear modulus G12.
+
+        For engineering shear strain gamma = applied_strain, the displacement
+        field is::
+
+            u(x, y) = (gamma / 2) * y
+            v(x, y) = (gamma / 2) * x
+            w       = 0
+
+        This gives ε_xy = gamma/2 (Voigt ε_6 = gamma), with all normal strains
+        and out-of-plane shear strains exactly zero.
+
+        BCs applied
+        -----------
+        - x_min (x = 0): ux = 0,              uy = (gamma/2) * y_node
+        - x_max (x = Lx): ux = (gamma/2)*y_node, uy = (gamma/2)*Lx
+        - y_min (y = 0): ux = 0,              uy = (gamma/2)*x_node
+        - y_max (y = Ly): ux = (gamma/2)*Ly,  uy = (gamma/2)*x_node
+        - uz = 0 pinned at the (x_min, y_min, z_min) corner to remove rigid-body
+          motion in z.
         """
         n_dof = self.mesh.n_dof
-        Lx = self.mesh.L_x
-        prescribed_disp = applied_strain * Lx
+        gamma = applied_strain
+        nodes = self.mesh.nodes  # shape (n_nodes, 3)
 
         constrained: Dict[int, float] = {}
 
-        # Fix ux and uy on x_min
-        for nid in self.mesh.nodes_on_face('x_min'):
-            constrained[3 * int(nid)] = 0.0
-            constrained[3 * int(nid) + 1] = 0.0
+        # ±x faces: u = gamma/2 * y_node,  v = gamma/2 * x_node
+        for face in ('x_min', 'x_max'):
+            for nid in self.mesh.nodes_on_face(face):
+                nid = int(nid)
+                x_n = float(nodes[nid, 0])
+                y_n = float(nodes[nid, 1])
+                constrained[3 * nid]     = (gamma / 2.0) * y_n   # ux
+                constrained[3 * nid + 1] = (gamma / 2.0) * x_n   # uy
 
-        # Prescribe uy on x_max
-        for nid in self.mesh.nodes_on_face('x_max'):
-            constrained[3 * int(nid) + 1] = prescribed_disp
+        # ±y faces: u = gamma/2 * y_node,  v = gamma/2 * x_node
+        for face in ('y_min', 'y_max'):
+            for nid in self.mesh.nodes_on_face(face):
+                nid = int(nid)
+                x_n = float(nodes[nid, 0])
+                y_n = float(nodes[nid, 1])
+                constrained[3 * nid]     = (gamma / 2.0) * y_n   # ux
+                constrained[3 * nid + 1] = (gamma / 2.0) * x_n   # uy
 
-        # Fix uz on one corner
+        # Fix uz at one corner to prevent rigid-body translation in z
         xmin_nodes = self.mesh.nodes_on_face('x_min')
         ymin_nodes = self.mesh.nodes_on_face('y_min')
         zmin_nodes = self.mesh.nodes_on_face('z_min')
