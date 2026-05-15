@@ -25,7 +25,8 @@ from porosity_fe_analysis import (MaterialProperties, MATERIALS, VoidGeometry, V
                                    GlobalAssembler, BoundaryHandler, FESolver, FieldResults,
                                    compute_clt_effective_modulus, check_mesh_quality,
                                    _build_provenance, load_results_from_json,
-                                   JSON_SCHEMA_VERSION, FORMAT_EMPIRICAL_SWEEP)
+                                   JSON_SCHEMA_VERSION, FORMAT_EMPIRICAL_SWEEP,
+                                   propagate_uncertainty)
 
 import porosity_fe_analysis
 
@@ -2558,3 +2559,131 @@ class TestCLIMain:
         ])
         assert rc == 0
         assert (tmp_path / 'porosity_analysis_results_2p5pct.json').exists()
+
+
+class TestMaterialPropertiesPerturb:
+    """Unit tests for the MaterialProperties.perturb sampling primitive."""
+
+    def test_zero_draw_lognormal_is_identity(self):
+        m = MATERIALS['T800_epoxy']
+        out = m.perturb({'sigma_1c': 0.0}, {'sigma_1c': ('lognormal', 0.08)})
+        # exp(sigma_ln * 0) == 1 -> nominal preserved.
+        assert out.sigma_1c == pytest.approx(m.sigma_1c)
+        # Untouched fields are copied through.
+        assert out.E22 == m.E22
+
+    def test_returns_new_instance_validated(self):
+        m = MATERIALS['T800_epoxy']
+        out = m.perturb({'E22': 1.5}, {'E22': ('lognormal', 0.05)})
+        assert out is not m
+        assert out.E22 > m.E22  # positive draw -> larger modulus
+        assert isinstance(out, MaterialProperties)
+
+    def test_unknown_distribution_rejected(self):
+        m = MATERIALS['T800_epoxy']
+        with pytest.raises(ValueError, match="Unknown distribution"):
+            m.perturb({'sigma_1c': 0.1}, {'sigma_1c': ('weibull', 0.1)})
+
+
+class TestPropagateUncertainty:
+    """Monte Carlo / LHS uncertainty propagation around get_failure_load."""
+
+    _N = 32  # tiny sample count keeps the suite fast
+
+    def test_result_keys_and_shapes(self):
+        r = propagate_uncertainty(
+            0.02, 'T800_epoxy', covs={'sigma_1c': 0.08, 'E22': 0.05},
+            n_samples=self._N, seed=42)
+        for key in ('failure_stress', 'knockdown', 'nominal', 'samples',
+                    'seed', 'n_samples', 'method', 'mode', 'model', 'spec'):
+            assert key in r
+        for stat_key in ('mean', 'std', 'min', 'max', 'percentiles'):
+            assert stat_key in r['failure_stress']
+            assert stat_key in r['knockdown']
+        assert set(r['failure_stress']['percentiles']) == {'p5', 'p50', 'p95'}
+        assert r['samples']['failure_stress'].shape == (self._N,)
+        assert r['samples']['knockdown'].shape == (self._N,)
+        # Echoed metadata.
+        assert r['seed'] == 42
+        assert r['n_samples'] == self._N
+        assert r['method'] == 'monte_carlo'
+
+    def test_same_seed_is_reproducible(self):
+        kw = dict(covs={'sigma_1c': 0.08, 'E22': 0.05},
+                  n_samples=self._N, seed=123)
+        r1 = propagate_uncertainty(0.02, 'T800_epoxy', **kw)
+        r2 = propagate_uncertainty(0.02, 'T800_epoxy', **kw)
+        np.testing.assert_array_equal(r1['samples']['failure_stress'],
+                                      r2['samples']['failure_stress'])
+        assert r1['failure_stress']['mean'] == r2['failure_stress']['mean']
+        assert r1['failure_stress']['std'] == r2['failure_stress']['std']
+
+    def test_different_seed_differs(self):
+        kw = dict(covs={'sigma_1c': 0.08}, n_samples=self._N)
+        r1 = propagate_uncertainty(0.02, 'T800_epoxy', seed=1, **kw)
+        r2 = propagate_uncertainty(0.02, 'T800_epoxy', seed=2, **kw)
+        assert r1['failure_stress']['mean'] != r2['failure_stress']['mean']
+
+    def test_mean_near_deterministic_nominal(self):
+        # With a modest CoV the MC mean should be within a few % of the
+        # deterministic single-point prediction.
+        r = propagate_uncertainty(
+            0.02, 'T800_epoxy', covs={'sigma_1c': 0.05},
+            n_samples=256, seed=7)
+        nominal = r['nominal']['failure_stress']
+        assert r['failure_stress']['mean'] == pytest.approx(nominal, rel=0.05)
+
+    def test_zero_cov_gives_zero_std(self):
+        r = propagate_uncertainty(
+            0.02, 'T800_epoxy', covs={'sigma_1c': 0.0, 'E22': 0.0},
+            n_samples=self._N, seed=9)
+        assert r['failure_stress']['std'] == 0.0
+        assert r['knockdown']['std'] == 0.0
+        assert r['failure_stress']['mean'] == pytest.approx(
+            r['nominal']['failure_stress'])
+        assert r['spec'] == {}  # all-zero CoV collapses to deterministic
+
+    def test_lhs_method_runs_and_is_reproducible(self):
+        kw = dict(covs={'sigma_1c': 0.08}, n_samples=self._N, seed=42,
+                  method='lhs')
+        r1 = propagate_uncertainty(0.02, 'T800_epoxy', **kw)
+        r2 = propagate_uncertainty(0.02, 'T800_epoxy', **kw)
+        assert r1['method'] == 'lhs'
+        assert r1['failure_stress']['std'] > 0.0
+        np.testing.assert_array_equal(r1['samples']['failure_stress'],
+                                      r2['samples']['failure_stress'])
+
+    def test_explicit_spec_and_vp_cov(self):
+        r = propagate_uncertainty(
+            0.02, 'T800_epoxy',
+            spec={'sigma_1c': ('uniform', 0.1)},
+            vp_cov=0.15, n_samples=self._N, seed=3)
+        assert r['failure_stress']['std'] > 0.0
+        assert r['vp_cov'] == 0.15
+        assert r['spec'] == {'sigma_1c': ['uniform', 0.1]}
+
+    def test_percentile_ordering(self):
+        r = propagate_uncertainty(
+            0.02, 'T800_epoxy', covs={'sigma_1c': 0.08},
+            n_samples=128, seed=11)
+        p = r['failure_stress']['percentiles']
+        assert p['p5'] <= p['p50'] <= p['p95']
+        fs = r['failure_stress']
+        assert fs['min'] <= p['p5']
+        assert p['p95'] <= fs['max']
+
+    def test_unknown_material_rejected(self):
+        with pytest.raises(ValueError, match="Unknown material"):
+            propagate_uncertainty(0.02, 'not_a_material',
+                                  covs={'sigma_1c': 0.08}, n_samples=4)
+
+    def test_unknown_method_rejected(self):
+        with pytest.raises(ValueError, match="Unknown sampling method"):
+            propagate_uncertainty(0.02, 'T800_epoxy',
+                                  covs={'sigma_1c': 0.08}, n_samples=4,
+                                  method='sobol')
+
+    def test_non_perturbable_field_rejected(self):
+        with pytest.raises(ValueError, match="non-perturbable"):
+            propagate_uncertainty(0.02, 'T800_epoxy',
+                                  covs={'not_a_field': 0.1}, n_samples=4)
