@@ -285,67 +285,130 @@ def summarize_mae(results: Dict[str, Any]) -> Dict[str, float]:
 
 
 import glob
+from concurrent.futures import ProcessPoolExecutor
 
 _MODULUS_PROPS = {'tensile_modulus', 'transverse_tensile_modulus',
                   'flexural_modulus', 'shear_modulus'}
 
 
-def run_all_datasets(datasets_dir: str = None) -> Dict[str, Any]:
-    """Run predictions for all datasets, return nested MAE results."""
+def _run_one_dataset(path: str):
+    """Compute the per-dataset MAE results for a single dataset JSON file.
+
+    Returns ``(name, dataset_results)`` where ``dataset_results`` has the same
+    shape the serial loop produced: either an ``{'error', 'error_type'}`` dict
+    on a load failure, or a ``{prop_key: {...}}`` mapping.
+
+    This is a *top-level* function (not a closure) so it is picklable and can
+    be dispatched to a ``ProcessPoolExecutor`` worker.  It contains zero
+    cross-dataset state, so running it in any order / any process yields
+    byte-identical results to the serial path (the pipeline is deterministic
+    and RNG-free).
+    """
+    name = os.path.basename(path).replace('.json', '')
+    try:
+        data = load_dataset(path)
+    except ValidationError as e:
+        logger.warning("Skipping dataset %s: %s", name, e)
+        return name, {
+            'error': str(e),
+            'error_type': type(e).__name__,
+        }
+
+    dataset_results = {}
+    for prop_key, prop_data in data['properties'].items():
+        vp = prop_data['void_content_pct']
+        exp = prop_data['normalized_values']
+        if prop_key in _UNSUPPORTED_STRENGTH_PROPS:
+            skip_msg = (
+                f"Skipping '{prop_key}' for dataset '{name}': no calibrated "
+                "EmpiricalSolver mode available (see issue #35)."
+            )
+            logger.warning(skip_msg)
+            dataset_results[prop_key] = {'skipped': skip_msg}
+            continue
+        try:
+            if prop_key in _MODULUS_PROPS:
+                pred = predict_modulus(data, prop_key, vp)
+            else:
+                pred = predict_strength(data, prop_key, vp)
+            mae = compute_mae(pred, exp)
+            dataset_results[prop_key] = {
+                'vp_pcts': list(vp),
+                'experimental': list(exp),
+                'predicted': pred,
+                'mae': mae,
+                'n_points': len(vp),
+            }
+        except Exception as e:
+            # logger.exception() captures the traceback so a downstream
+            # debug log (logging level DEBUG/INFO) shows *why* the
+            # property prediction failed, rather than just the bare
+            # string we surface in the JSON results (#19).
+            logger.exception("Prediction failed for %s/%s", name, prop_key)
+            dataset_results[prop_key] = {
+                'error': str(e),
+                'error_type': type(e).__name__,
+            }
+    return name, dataset_results
+
+
+def _resolve_n_jobs(n_jobs: int) -> int:
+    """Map the public ``n_jobs`` contract onto a concrete worker count.
+
+    ``n_jobs <= 0`` (covers ``-1`` and ``0``) means "use all cores".
+    ``os.cpu_count()`` can return ``None`` on exotic platforms; fall back to
+    ``1`` (serial) there so we never crash on a missing CPU count.
+    """
+    if n_jobs <= 0:
+        return os.cpu_count() or 1
+    return n_jobs
+
+
+def run_all_datasets(datasets_dir: str = None,
+                      n_jobs: int = 1) -> Dict[str, Any]:
+    """Run predictions for all datasets, return nested MAE results.
+
+    Parameters
+    ----------
+    datasets_dir:
+        Directory of dataset JSON files (defaults to the bundled
+        ``validation/datasets/``).
+    n_jobs:
+        Process-level parallelism for the per-dataset work.
+
+        * ``1`` (default) keeps the original *serial* code path verbatim —
+          zero behaviour change, fully deterministic, back-compatible.
+        * ``>1`` distributes per-dataset work across that many worker
+          processes via ``concurrent.futures.ProcessPoolExecutor``.
+        * ``-1`` or ``0`` uses ``os.cpu_count()`` workers.
+
+        Every ``(dataset)`` task is fully independent and the pipeline is
+        RNG-free, so the returned dict is identical (same keys, same values)
+        regardless of ``n_jobs``.  Results are always assembled in sorted
+        dataset order, so dict iteration order is deterministic too.
+    """
     if datasets_dir is None:
         datasets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     'datasets')
 
-    all_results = {}
-    for path in sorted(glob.glob(os.path.join(datasets_dir, '*.json'))):
-        name = os.path.basename(path).replace('.json', '')
-        try:
-            data = load_dataset(path)
-        except ValidationError as e:
-            logger.warning("Skipping dataset %s: %s", name, e)
-            all_results[name] = {
-                'error': str(e),
-                'error_type': type(e).__name__,
-            }
-            continue
+    paths = sorted(glob.glob(os.path.join(datasets_dir, '*.json')))
+    workers = _resolve_n_jobs(n_jobs)
 
-        dataset_results = {}
-        for prop_key, prop_data in data['properties'].items():
-            vp = prop_data['void_content_pct']
-            exp = prop_data['normalized_values']
-            if prop_key in _UNSUPPORTED_STRENGTH_PROPS:
-                skip_msg = (
-                    f"Skipping '{prop_key}' for dataset '{name}': no calibrated "
-                    "EmpiricalSolver mode available (see issue #35)."
-                )
-                logger.warning(skip_msg)
-                dataset_results[prop_key] = {'skipped': skip_msg}
-                continue
-            try:
-                if prop_key in _MODULUS_PROPS:
-                    pred = predict_modulus(data, prop_key, vp)
-                else:
-                    pred = predict_strength(data, prop_key, vp)
-                mae = compute_mae(pred, exp)
-                dataset_results[prop_key] = {
-                    'vp_pcts': list(vp),
-                    'experimental': list(exp),
-                    'predicted': pred,
-                    'mae': mae,
-                    'n_points': len(vp),
-                }
-            except Exception as e:
-                # logger.exception() captures the traceback so a downstream
-                # debug log (logging level DEBUG/INFO) shows *why* the
-                # property prediction failed, rather than just the bare
-                # string we surface in the JSON results (#19).
-                logger.exception("Prediction failed for %s/%s", name, prop_key)
-                dataset_results[prop_key] = {
-                    'error': str(e),
-                    'error_type': type(e).__name__,
-                }
-        all_results[name] = dataset_results
-    return all_results
+    if workers <= 1 or len(paths) <= 1:
+        # Serial path: byte-identical to the historical implementation.
+        return {name: res for name, res in (_run_one_dataset(p)
+                                            for p in paths)}
+
+    # Parallel path: dispatch independent per-dataset tasks across processes,
+    # then reassemble in sorted (== input) order so the result dict is
+    # deterministic and identical to the serial path.
+    by_name = {}
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        for name, dataset_results in executor.map(_run_one_dataset, paths):
+            by_name[name] = dataset_results
+    return {os.path.basename(p).replace('.json', ''):
+            by_name[os.path.basename(p).replace('.json', '')]
+            for p in paths}
 
 
 import matplotlib

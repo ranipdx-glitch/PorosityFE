@@ -478,3 +478,56 @@ def test_per_dataset_mae_regression_pinned(key, _all_results):
     assert mae == pytest.approx(baseline, rel=0.10, abs=0.5), (
         f"{dataset}/{prop} MAE drifted: {mae:.3f} vs baseline {baseline:.3f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #56 — parallel per-dataset walk must be identical to the serial path
+# ---------------------------------------------------------------------------
+
+# Run the (slow) full serial walk exactly once and share it across the
+# parallelism tests so we don't duplicate the expensive computation.
+@pytest.fixture(scope="module")
+def serial_results():
+    from validation.validate_all import run_all_datasets
+    return run_all_datasets(n_jobs=1)
+
+
+def test_n_jobs_default_is_serial_path(serial_results):
+    """n_jobs=1 (default) must equal an explicit serial run — back-compat."""
+    from validation.validate_all import run_all_datasets
+    assert run_all_datasets() == serial_results
+
+
+def test_run_all_datasets_parallel_matches_serial(serial_results):
+    """run_all_datasets(n_jobs=2) must return a result *equal* to the serial
+    path: same keys, same order, same values (issue #56)."""
+    from validation.validate_all import run_all_datasets
+    parallel_results = run_all_datasets(n_jobs=2)
+    # Identical keys in identical (sorted) order.
+    assert list(parallel_results.keys()) == list(serial_results.keys())
+    # Deep-equal values (MAE floats, predicted lists, error dicts, skips).
+    assert parallel_results == serial_results
+
+
+def test_run_all_datasets_n_jobs_all_cores_matches_serial(serial_results):
+    """n_jobs=-1 (all cores) must also be identical to the serial path."""
+    from validation.validate_all import run_all_datasets
+    assert run_all_datasets(n_jobs=-1) == serial_results
+
+
+def test_resolve_n_jobs_contract():
+    """-1 and 0 map to os.cpu_count(); positive values pass through."""
+    import os
+    from validation.validate_all import _resolve_n_jobs
+    expected_all = os.cpu_count() or 1
+    assert _resolve_n_jobs(-1) == expected_all
+    assert _resolve_n_jobs(0) == expected_all
+    assert _resolve_n_jobs(1) == 1
+    assert _resolve_n_jobs(4) == 4
+
+
+def test_run_one_dataset_is_picklable():
+    """The ProcessPool worker must be a top-level (picklable) function."""
+    import pickle
+    from validation.validate_all import _run_one_dataset
+    assert pickle.loads(pickle.dumps(_run_one_dataset)) is _run_one_dataset

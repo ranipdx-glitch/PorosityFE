@@ -126,6 +126,13 @@ def main(argv=None) -> int:
              'datasets) to the output directory',
     )
     parser.add_argument(
+        '--jobs', type=int, default=1, metavar='N',
+        help='Number of worker processes for the per-dataset validation '
+             'walk. 1 (default) runs serially (deterministic, unchanged '
+             'behaviour); N>1 parallelises across processes; -1 or 0 uses '
+             'all available CPU cores. Results are identical regardless of N.',
+    )
+    parser.add_argument(
         '--version', action='version',
         version=f'validate_porosity {_resolve_version()}',
     )
@@ -162,7 +169,7 @@ def main(argv=None) -> int:
         print()
 
     # Run predictions
-    results = run_all_datasets(datasets_dir=datasets_dir)
+    results = run_all_datasets(datasets_dir=datasets_dir, n_jobs=args.jobs)
 
     if not args.quiet:
         print(f"Loaded {len(results)} datasets. Generating report...")
