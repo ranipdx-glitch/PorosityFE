@@ -2386,3 +2386,273 @@ class TestProvenanceInFEExportResults:
         assert isinstance(prov['timestamp_utc'], str) and prov['timestamp_utc']
         assert 'porosity_fe_version' in prov
         assert data['schema_version'] == '1.0'
+
+
+class TestValidateCLIMain:
+    """End-to-end exercise of validate_porosity_cli.main() (issue: coverage).
+
+    The CLI was previously only smoke-tested with --help. main() takes argv
+    and returns an int exit code by design, so the argument handling, the
+    error paths, and a full report-generating run are all directly testable.
+    """
+
+    def test_version_exits_zero(self):
+        from validate_porosity_cli import main
+        with pytest.raises(SystemExit) as exc:
+            main(['--version'])
+        assert exc.value.code == 0
+
+    def test_missing_datasets_dir_returns_2(self, tmp_path, capsys):
+        from validate_porosity_cli import main
+        missing = tmp_path / "does_not_exist"
+        rc = main(['--datasets', str(missing), '--output-dir', str(tmp_path)])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "Datasets directory not found" in err
+
+    def test_full_run_against_bundled_datasets(self, tmp_path, capsys):
+        from validate_porosity_cli import main
+        rc = main(['--output-dir', str(tmp_path)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Summary block is printed on a successful run.
+        assert "Overall MAE" in out
+        assert "Datasets processed" in out
+        # generate_master_report writes a PNG + Markdown report into output-dir.
+        pngs = list(tmp_path.glob("*.png"))
+        mds = list(tmp_path.glob("*.md"))
+        assert pngs, "expected a PNG report in the output directory"
+        assert mds, "expected a Markdown report in the output directory"
+
+    def test_quiet_suppresses_per_dataset_progress(self, tmp_path, capsys):
+        from validate_porosity_cli import main
+        rc = main(['--output-dir', str(tmp_path), '--quiet'])
+        assert rc == 0
+        out = capsys.readouterr().out
+        # The "Running porosity validation suite" banner is gated on not-quiet.
+        assert "Running porosity validation suite" not in out
+        # The final summary is printed regardless of --quiet.
+        assert "Overall MAE" in out
+
+    def test_configure_debug_logging_creates_log_file(self, tmp_path):
+        import logging
+        from validate_porosity_cli import _configure_debug_logging
+
+        root = logging.getLogger()
+        saved_handlers = root.handlers[:]
+        saved_level = root.level
+        try:
+            log_path = _configure_debug_logging(str(tmp_path))
+            assert os.path.isfile(log_path)
+            assert log_path.endswith(".log")
+            # Emitting a record should land in the file via the new handler.
+            logging.getLogger("porosity_test").debug("debug-probe-line")
+            for h in root.handlers:
+                h.flush()
+            with open(log_path, encoding="utf-8") as f:
+                assert "debug-probe-line" in f.read()
+        finally:
+            # Restore global logging state so the DEBUG file handler does not
+            # leak into (and flood) the rest of the suite.
+            for h in root.handlers:
+                if h not in saved_handlers:
+                    h.close()
+            root.handlers[:] = saved_handlers
+            root.setLevel(saved_level)
+
+    def test_debug_run_reports_log_path(self, tmp_path, capsys):
+        import logging
+        from validate_porosity_cli import main
+
+        root = logging.getLogger()
+        saved_handlers = root.handlers[:]
+        saved_level = root.level
+        try:
+            rc = main(['--output-dir', str(tmp_path), '--quiet', '--debug'])
+            assert rc == 0
+            out = capsys.readouterr().out
+            assert "Debug log:" in out
+            assert list(tmp_path.glob("validate_porosity_*.log"))
+        finally:
+            for h in root.handlers:
+                if h not in saved_handlers:
+                    h.close()
+            root.handlers[:] = saved_handlers
+            root.setLevel(saved_level)
+
+
+class TestAppSerialiseHelpers:
+    """In-memory serialisers used by the Streamlit download buttons.
+
+    These are pure string functions (no Streamlit, no filesystem) and must
+    stay byte-for-byte consistent with the on-disk writers so a downloaded
+    file matches a saved one.
+    """
+
+    @staticmethod
+    def _sample_payload():
+        from app import build_export_payload
+        return build_export_payload(TestExportHelpers._sample_result())
+
+    def test_serialise_json_has_envelope_and_round_trips(self):
+        from app import _serialise_payload_json
+        from porosity_fe_analysis import (FORMAT_EMPIRICAL_SWEEP,
+                                          JSON_SCHEMA_VERSION)
+        text = _serialise_payload_json(self._sample_payload())
+        data = json.loads(text)
+        assert data["schema_version"] == JSON_SCHEMA_VERSION
+        assert data["format"] == FORMAT_EMPIRICAL_SWEEP
+        assert data["empirical"]["compression"]["judd_wright"]["knockdown"] == 0.823
+
+    def test_serialise_json_matches_file_writer(self, tmp_path):
+        from app import _serialise_payload_json, write_results_json
+        payload = self._sample_payload()
+        path = str(tmp_path / "out.json")
+        write_results_json(path, payload)
+        with open(path, encoding="utf-8") as f:
+            on_disk = f.read()
+        assert json.loads(_serialise_payload_json(payload)) == json.loads(on_disk)
+
+    def test_serialise_csv_has_comments_header_and_rows(self):
+        from app import _serialise_payload_csv
+        text = _serialise_payload_csv(self._sample_payload())
+        lines = text.splitlines()
+        comment_lines = [l for l in lines if l.startswith("#")]
+        data_lines = [l for l in lines if not l.startswith("#")]
+        assert any("material: T800_epoxy" in l for l in comment_lines)
+        assert data_lines[0] == "mode,model,failure_stress_MPa,knockdown"
+        assert "compression,judd_wright,1234.5,0.823" in data_lines
+
+    def test_serialise_csv_matches_file_writer(self, tmp_path):
+        from app import _serialise_payload_csv, write_results_csv
+        payload = self._sample_payload()
+        path = str(tmp_path / "out.csv")
+        write_results_csv(path, payload)
+        with open(path, encoding="utf-8", newline="") as f:
+            on_disk = f.read()
+        assert _serialise_payload_csv(payload) == on_disk
+
+
+class TestConfigToKey:
+    """_config_to_key feeds st.cache_data, so it must be hashable, stable,
+    and losslessly reversible by run_analysis_cached's reconstruction."""
+
+    @staticmethod
+    def _cfg():
+        return {
+            "material_name": "T800_epoxy",
+            "angles": [0.0, 90.0, 90.0, 0.0],
+            "n_plies": 4,
+            "t_ply": 0.183,
+            "Vp": 3.0,
+            "distribution": "uniform",
+            "cluster_location": "midplane",
+            "void_shape": "spherical",
+            "loading_mode": "compression",
+            "nx": 3, "ny": 2, "nz": 2,
+        }
+
+    def test_key_is_hashable(self):
+        from app import _config_to_key
+        key = _config_to_key(self._cfg())
+        # Must be usable as a dict/set member (st.cache_data requirement).
+        assert hash(key) == hash(_config_to_key(self._cfg()))
+        assert key in {key}
+
+    def test_key_is_deterministic(self):
+        from app import _config_to_key
+        assert _config_to_key(self._cfg()) == _config_to_key(self._cfg())
+
+    def test_key_distinguishes_changed_field(self):
+        from app import _config_to_key
+        a = self._cfg()
+        b = self._cfg()
+        b["Vp"] = 5.0
+        assert _config_to_key(a) != _config_to_key(b)
+
+    def test_list_fields_become_tuples(self):
+        from app import _config_to_key
+        key = dict(_config_to_key(self._cfg()))
+        assert key["angles"] == (0.0, 90.0, 90.0, 0.0)
+        assert isinstance(key["angles"], tuple)
+
+    def test_round_trips_through_cached_reconstruction(self):
+        # run_analysis_cached rebuilds a cfg dict from the key tuple; mirror
+        # that logic to prove the encode/decode pair is lossless.
+        from app import _config_to_key
+        cfg = self._cfg()
+        key = _config_to_key(cfg)
+        rebuilt = {}
+        for k, v in key:
+            rebuilt[k] = list(v) if isinstance(v, tuple) else v
+        for k in rebuilt:
+            assert rebuilt[k] == cfg[k]
+
+
+class TestRunAnalysis:
+    """run_analysis is the un-cached core the Streamlit app fans out from.
+    It contains no st.* calls, so it is fully testable headless."""
+
+    @staticmethod
+    def _cfg(**overrides):
+        cfg = {
+            "material_name": "T800_epoxy",
+            "angles": [0.0, 90.0, 90.0, 0.0],
+            "n_plies": 4,
+            "t_ply": 0.183,
+            "Vp": 3.0,
+            "distribution": "uniform",
+            "cluster_location": "midplane",
+            "void_shape": "spherical",
+            "loading_mode": "compression",
+            "nx": 3, "ny": 2, "nz": 2,
+        }
+        cfg.update(overrides)
+        return cfg
+
+    def test_compression_run_returns_expected_keys(self):
+        from app import run_analysis
+        result = run_analysis(self._cfg())
+        for key in ("config", "material", "porosity_field", "mesh",
+                    "empirical", "fe_field", "fe_loading",
+                    "fe_skipped_reason", "f_md"):
+            assert key in result
+        assert result["fe_loading"] == "compression"
+        assert result["fe_field"] is not None
+        assert result["fe_skipped_reason"] is None
+        # Empirical knockdowns are physical fractions in (0, 1].
+        kd = result["empirical"]["compression"]["judd_wright"]["knockdown"]
+        assert 0.0 < kd <= 1.0
+
+    def test_material_overrides_are_applied(self):
+        from app import run_analysis
+        result = run_analysis(self._cfg(n_plies=8, t_ply=0.2))
+        assert result["material"].n_plies == 8
+        assert result["material"].t_ply == 0.2
+
+    def test_ilss_skips_fe_with_reason(self):
+        from app import run_analysis
+        result = run_analysis(self._cfg(loading_mode="ilss"))
+        assert result["fe_field"] is None
+        assert result["fe_loading"] is None
+        assert "ilss" in result["fe_skipped_reason"]
+        # Empirical results are still produced for the skipped-FE mode.
+        assert "ilss" in result["empirical"]
+
+    def test_tension_loading_runs_fe(self):
+        from app import run_analysis
+        result = run_analysis(self._cfg(loading_mode="tension"))
+        assert result["fe_loading"] == "tension"
+        assert result["fe_field"] is not None
+
+    def test_clustered_distribution_path(self):
+        from app import run_analysis
+        result = run_analysis(
+            self._cfg(distribution="clustered", cluster_location="surface"))
+        assert result["porosity_field"].distribution == "clustered"
+        assert result["porosity_field"].cluster_location == "surface"
+
+    def test_unknown_material_raises_value_error(self):
+        from app import run_analysis
+        with pytest.raises(ValueError, match="Unknown material"):
+            run_analysis(self._cfg(material_name="unobtanium_epoxy"))
