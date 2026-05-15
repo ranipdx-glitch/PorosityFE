@@ -25,15 +25,11 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install numpy scipy matplotlib pytest jsonschema
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
 
     - name: Run tests
       run: pytest tests/ -v --tb=short
 
-    - name: Install GUI extras
-      run: pip install "PyQt6>=6.5.0"
-
-    - name: Smoke-test GUI imports
-      env:
-        QT_QPA_PLATFORM: offscreen
-      run: python -c "import porosity_gui; print('porosity_gui imports OK')"
+    - name: Smoke-test Streamlit app imports
+      run: python -c "import app; print('app imports OK')"

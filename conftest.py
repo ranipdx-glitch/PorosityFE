@@ -1,7 +1,7 @@
 """Repo-root conftest: makes the top-level modules importable to tests.
 
 Each test file used to do its own `sys.path.insert(0, ...)` to find
-`porosity_fe_analysis` / `porosity_gui` / `validate_porosity_cli` / the
+`porosity_fe_analysis` / `app` / `validate_porosity_cli` / the
 `validation` package. Pytest auto-imports this conftest before collecting
 any test, so the boilerplate now lives in exactly one place (#29).
 

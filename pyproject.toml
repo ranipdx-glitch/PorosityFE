@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "porosity-fe"
 version = "1.2.0"
-description = "Desktop application for porosity-degraded composite laminate analysis"
+description = "Streamlit web app for porosity-degraded composite laminate analysis"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -38,14 +38,14 @@ classifiers = [
 dependencies = [
     "numpy>=1.20.0",
     "scipy>=1.7.0",
-    "matplotlib>=3.4.0",
+    "matplotlib>=3.9,<4",
     "jsonschema>=4.0.0",
 ]
 
 [project.optional-dependencies]
-gui = ["PyQt6>=6.5.0"]
+web = ["streamlit>=1.32"]
 dev = ["pytest>=7.0.0"]
-all = ["PyQt6>=6.5.0", "pytest>=7.0.0"]
+all = ["streamlit>=1.32", "pytest>=7.0.0"]
 
 [project.urls]
 Homepage = "https://github.com/elhajjar1/PorosityFE"
@@ -53,11 +53,10 @@ Repository = "https://github.com/elhajjar1/PorosityFE"
 Issues = "https://github.com/elhajjar1/PorosityFE/issues"
 
 [project.scripts]
-porosity-fe = "porosity_gui:_console_main"
 validate_porosity = "validate_porosity_cli:main"
 
 [tool.setuptools]
-py-modules = ["porosity_fe_analysis", "porosity_gui", "validate_porosity_cli"]
+py-modules = ["porosity_fe_analysis", "app", "validate_porosity_cli"]
 packages = ["validation"]
 
 [tool.setuptools.package-data]

@@ -6,7 +6,7 @@
 [![Build Executables](https://github.com/elhajjar1/PorosityFE/actions/workflows/build-executables.yml/badge.svg)](https://github.com/elhajjar1/PorosityFE/actions/workflows/build-executables.yml)
 [![Release](https://img.shields.io/github/v/release/elhajjar1/PorosityFE?include_prereleases)](https://github.com/elhajjar1/PorosityFE/releases)
 
-A desktop application and Python library for predicting how porosity defects degrade the strength and stiffness of fiber-reinforced composite laminates.
+A Streamlit web app and Python library for predicting how porosity defects degrade the strength and stiffness of fiber-reinforced composite laminates.
 
 ## Why This Tool?
 
@@ -15,7 +15,7 @@ Manufacturing defects like porosity are inevitable in composite structures. Engi
 - **Fast empirical screening** using calibrated Judd-Wright and power-law models
 - **3D finite element analysis** with Eshelby-based stiffness degradation at each element
 - **Layup-aware predictions** that account for how ply orientation affects porosity sensitivity
-- **Interactive GUI** for rapid parametric studies without writing code
+- **Interactive web app** for rapid parametric studies without writing code
 
 ![Empirical Knockdown Curves](screenshots/knockdown_curves.png)
 
@@ -50,7 +50,7 @@ pip install -e ".[all]"
 
 ### Dependencies only
 ```bash
-pip install numpy scipy matplotlib PyQt6
+pip install -r requirements.txt
 ```
 
 ### Run tests
@@ -60,10 +60,15 @@ pytest tests/ -v
 
 ## Usage
 
-### Desktop GUI
+### Web app (Streamlit)
 ```bash
-python porosity_gui.py
+streamlit run app.py
 ```
+Opens a browser UI at http://localhost:8501 with sidebar inputs (material, layup,
+porosity, loading mode, mesh) and tabs for the porosity profile, mesh,
+knockdown bar chart, FE stress contours, and result downloads. See
+[`DEPLOYMENT_STREAMLIT.md`](DEPLOYMENT_STREAMLIT.md) for hosting on Streamlit
+Community Cloud.
 
 ### Command-line analysis
 ```bash
@@ -139,13 +144,6 @@ Notes:
   a non-standard material system, see
   [Calibrating `alpha` / `n` for a custom material](#calibrating-alpha--n-for-a-custom-material).
 
-### Build macOS GUI app
-```bash
-pip install pyinstaller
-python -m PyInstaller PorosityFE.spec --noconfirm --clean
-# App at dist/PorosityFE.app
-```
-
 ### Build validate_porosity CLI executable (Linux / macOS / Windows)
 ```bash
 pip install pyinstaller
@@ -179,7 +177,7 @@ validate_porosity --quiet            # suppress progress output
 | `porosity_knockdown_curves.png` | Knockdown vs porosity curves |
 | `porosity_analysis_results_*.json` | Numerical results (JSON) |
 
-The GUI's **File → Export Results** menu writes the active run's empirical knockdown table to either JSON or CSV — the format is picked from the file extension you type in the save dialog (`.json` or `.csv`). CSV files include the analysis configuration as `#`-prefixed comment lines at the top (which pandas, Excel, and MATLAB all ignore by default), followed by a flat `mode,model,failure_stress_MPa,knockdown` table.
+The web app's **Export** tab provides one-click downloads of the active run's empirical knockdown table as either JSON or CSV. CSV files include the analysis configuration as `#`-prefixed comment lines at the top (which pandas, Excel, and MATLAB all ignore by default), followed by a flat `mode,model,failure_stress_MPa,knockdown` table.
 
 ## Inputs and Conventions
 

@@ -1858,7 +1858,7 @@ class TestLayupParser:
     """parse_layup is a pure helper extracted in #9; tested here for #12."""
 
     def setup_method(self):
-        from porosity_gui import parse_layup
+        from app import parse_layup
         self.parse_layup = parse_layup
 
     def test_simple_slash_form(self):
@@ -1920,14 +1920,14 @@ class TestExportHelpers:
         }
 
     def test_build_export_payload_shape(self):
-        from porosity_gui import build_export_payload
+        from app import build_export_payload
         payload = build_export_payload(self._sample_result())
         assert payload["config"]["material"] == "T800_epoxy"
         assert payload["config"]["mesh"] == "30x10x12"
         assert payload["empirical"]["compression"]["judd_wright"]["knockdown"] == 0.823
 
     def test_write_results_json_round_trips(self, tmp_path):
-        from porosity_gui import build_export_payload, write_results_json
+        from app import build_export_payload, write_results_json
         path = str(tmp_path / "out.json")
         write_results_json(path, build_export_payload(self._sample_result()))
         with open(path, encoding="utf-8") as f:
@@ -1935,7 +1935,7 @@ class TestExportHelpers:
         assert data["empirical"]["compression"]["judd_wright"]["knockdown"] == 0.823
 
     def test_write_results_csv_header_and_rows(self, tmp_path):
-        from porosity_gui import build_export_payload, write_results_csv
+        from app import build_export_payload, write_results_csv
         path = str(tmp_path / "out.csv")
         write_results_csv(path, build_export_payload(self._sample_result()))
         with open(path, encoding="utf-8") as f:
@@ -1952,7 +1952,7 @@ class TestExportHelpers:
 
     def test_write_results_csv_round_trips_via_csv_module(self, tmp_path):
         import csv as _csv
-        from porosity_gui import build_export_payload, write_results_csv
+        from app import build_export_payload, write_results_csv
         path = str(tmp_path / "out.csv")
         write_results_csv(path, build_export_payload(self._sample_result()))
         with open(path, encoding="utf-8", newline="") as f:
@@ -1964,30 +1964,6 @@ class TestExportHelpers:
             assert len(row) == 4
             float(row[2])
             float(row[3])
-
-
-class TestConsoleMainWrapper:
-    """Regression for #46: porosity-fe console script must print a friendly
-    message + exit non-zero when PyQt6 is missing, instead of leaking a
-    Python traceback."""
-
-    def test_console_main_exits_zero_or_one(self):
-        """The wrapper must return an int exit code, not raise."""
-        from porosity_gui import _console_main, HAS_PYQT6
-        if HAS_PYQT6:
-            pytest.skip("PyQt6 present; missing-import path can't be exercised")
-        rc = _console_main()
-        assert rc == 1
-
-    def test_check_pyqt6_message_points_to_gui_extra(self):
-        """Error message must mention the [gui] extra so users know what
-        install command to run (not just `pip install PyQt6`)."""
-        from porosity_gui import _check_pyqt6, HAS_PYQT6
-        if HAS_PYQT6:
-            pytest.skip("PyQt6 present; error path can't be exercised")
-        with pytest.raises(ImportError) as exc:
-            _check_pyqt6()
-        assert "porosity-fe[gui]" in str(exc.value)
 
 
 class TestKeCacheKeyGeometry:
