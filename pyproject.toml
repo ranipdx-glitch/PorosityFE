@@ -64,3 +64,24 @@ validation = ["datasets/*.json", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["."]
+# Coverage of the test files themselves is not a useful signal and only
+# inflates the headline number; the gate should reflect production code.
+omit = [
+    "tests/*",
+    "conftest.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+# Production-code coverage currently sits at ~95%. 90 is a deliberately
+# conservative floor: tight enough to catch a whole module's tests
+# regressing, loose enough not to flake on a 1-2% wobble. Raise it as
+# coverage hardens.
+fail_under = 90
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]

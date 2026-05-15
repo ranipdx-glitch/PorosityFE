@@ -29,7 +29,10 @@ jobs:
         pip install -r requirements-test.txt
 
     - name: Run tests
-      run: pytest tests/ -v --tb=short
+      # Coverage source/omit and the fail-under threshold live in
+      # pyproject.toml ([tool.coverage.*]); --cov-fail-under here makes the
+      # gate explicit and version-independent of pytest-cov config parsing.
+      run: pytest tests/ -v --tb=short --cov --cov-report=term-missing --cov-fail-under=90
 
     - name: Smoke-test Streamlit app imports
       run: python -c "import app; print('app imports OK')"
