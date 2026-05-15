@@ -2858,3 +2858,272 @@ class TestInputValidationRaises:
         path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
         with pytest.raises(ValueError, match="expected a JSON object"):
             load_results_from_json(str(path))
+
+
+# ======================================================================
+# Tier 3: plotting / entry-point / Streamlit-UI smoke coverage
+#
+# Low correctness risk but high line count. These don't assert on pixels;
+# they prove the functions still build a Figure / drive the control flow
+# without raising, which is what catches signature/import breakage.
+# ======================================================================
+
+
+def _synthetic_empirical_block():
+    """Minimal {mode: {model: {...}}} block the plot functions read."""
+    return {
+        mode: {
+            model: {"knockdown": 0.80, "failure_stress": 1000.0}
+            for model in ("judd_wright", "power_law", "linear")
+        }
+        for mode in ("compression", "tension", "shear", "ilss")
+    }
+
+
+class TestFEVisualizerPlotSmoke:
+    """plot_knockdown_curves / plot_model_comparison were never exercised.
+    Drive them with a synthetic results dict shaped exactly as main()
+    builds it; assert a Figure comes back and the PNG is written."""
+
+    @staticmethod
+    def _results_one_level():
+        # main() uses keys like 'uniform_spherical'; the 'uniform' substring
+        # selects a solid vs dashed line style in plot_knockdown_curves.
+        return {
+            "uniform_spherical": {"empirical": _synthetic_empirical_block()},
+            "clustered_midplane": {"empirical": _synthetic_empirical_block()},
+        }
+
+    def test_plot_model_comparison_returns_figure_and_saves(self, tmp_path):
+        out = tmp_path / "model_comparison.png"
+        fig = FEVisualizer.plot_model_comparison(
+            self._results_one_level(), save_path=str(out))
+        try:
+            assert isinstance(fig, plt.Figure)
+            assert out.is_file() and out.stat().st_size > 0
+        finally:
+            plt.close(fig)
+
+    def test_plot_knockdown_curves_returns_figure_and_saves(self, tmp_path):
+        results_by_porosity = {
+            "1pct": self._results_one_level(),
+            "3pct": self._results_one_level(),
+            "5pct": self._results_one_level(),
+        }
+        out = tmp_path / "knockdown_curves.png"
+        fig = FEVisualizer.plot_knockdown_curves(
+            results_by_porosity, save_path=str(out))
+        try:
+            assert isinstance(fig, plt.Figure)
+            assert out.is_file() and out.stat().st_size > 0
+        finally:
+            plt.close(fig)
+
+    def test_plot_functions_work_without_save_path(self):
+        f1 = FEVisualizer.plot_model_comparison(self._results_one_level())
+        f2 = FEVisualizer.plot_knockdown_curves(
+            {"2pct": self._results_one_level()})
+        try:
+            assert isinstance(f1, plt.Figure) and isinstance(f2, plt.Figure)
+        finally:
+            plt.close(f1)
+            plt.close(f2)
+
+
+class TestAppPlotSmoke:
+    """The Streamlit tab plot builders (plot_profile/mesh/results/stress)
+    contain real layout logic but were entirely uncovered."""
+
+    @classmethod
+    def setup_class(cls):
+        # One small analysis shared by every plot test (FE-backed, so the
+        # stress tab and the FE overlay in plot_results are exercised).
+        from app import run_analysis
+        cls.cfg = {
+            "material_name": "T800_epoxy",
+            "angles": [0.0, 90.0, 90.0, 0.0],
+            "n_plies": 4,
+            "t_ply": 0.183,
+            "Vp": 3.0,
+            "distribution": "uniform",
+            "cluster_location": "midplane",
+            "void_shape": "spherical",
+            "loading_mode": "compression",
+            "nx": 3, "ny": 2, "nz": 2,
+        }
+        cls.result = run_analysis(cls.cfg)
+        # ILSS skips the FE pass -> fe_field is None (no-FE plot branches).
+        ilss_cfg = dict(cls.cfg, loading_mode="ilss")
+        cls.result_no_fe = run_analysis(ilss_cfg)
+
+    def test_plot_profile(self):
+        from app import plot_profile
+        fig = plot_profile(self.result)
+        try:
+            assert isinstance(fig, plt.Figure)
+        finally:
+            plt.close(fig)
+
+    def test_plot_mesh(self):
+        from app import plot_mesh
+        fig = plot_mesh(self.result)
+        try:
+            assert isinstance(fig, plt.Figure)
+        finally:
+            plt.close(fig)
+
+    def test_plot_results_with_fe_overlay(self):
+        from app import plot_results
+        fig = plot_results(self.result, "[0/90/90/0]")
+        try:
+            assert isinstance(fig, plt.Figure)
+        finally:
+            plt.close(fig)
+
+    def test_plot_results_without_fe(self):
+        from app import plot_results
+        fig = plot_results(self.result_no_fe, "[0/90/90/0]")
+        try:
+            assert isinstance(fig, plt.Figure)
+        finally:
+            plt.close(fig)
+
+    def test_plot_stress_each_component(self):
+        from app import _STRESS_COMPONENTS, plot_stress
+        for comp_name in _STRESS_COMPONENTS:  # includes "Von Mises" (idx -1)
+            fig = plot_stress(self.result, comp_name)
+            try:
+                assert isinstance(fig, plt.Figure)
+            finally:
+                plt.close(fig)
+
+    def test_plot_stress_no_fe_field_message(self):
+        from app import plot_stress
+        # fe_field is None -> the "No FE results available" placeholder path.
+        fig = plot_stress(self.result_no_fe, "Von Mises")
+        try:
+            assert isinstance(fig, plt.Figure)
+        finally:
+            plt.close(fig)
+
+
+class TestAnalysisMainSmoke:
+    """porosity_fe_analysis.main() is a thin orchestration loop. Running it
+    for real is minutes of FE + ~50 PNGs; stub the heavy collaborators and
+    assert the control flow / filename wiring holds and it runs to the
+    completion banner."""
+
+    def test_main_drives_pipeline_to_completion(self, tmp_path, monkeypatch,
+                                                 capsys):
+        import porosity_fe_analysis as pfa
+
+        calls = {"compare": 0, "save": 0, "model_cmp": 0, "kd_curves": 0}
+
+        def fake_compare(Vp, *a, **k):
+            calls["compare"] += 1
+            return {
+                "uniform_spherical": {
+                    "porosity_field": None,
+                    "mesh": None,
+                    "empirical_solver": None,
+                }
+            }
+
+        def fake_save(results, filename):
+            calls["save"] += 1
+            # main() builds per-level filenames; sanity-check the wiring.
+            assert filename.endswith(".json")
+
+        monkeypatch.setattr(pfa, "compare_configurations", fake_compare)
+        monkeypatch.setattr(pfa, "save_results_to_json", fake_save)
+        for meth in ("plot_porosity_field", "plot_mesh_3d",
+                     "plot_mesh_detail", "plot_damage_contour"):
+            monkeypatch.setattr(pfa.FEVisualizer, meth,
+                                staticmethod(lambda *a, **k: None))
+        monkeypatch.setattr(
+            pfa.FEVisualizer, "plot_model_comparison",
+            staticmethod(lambda *a, **k: calls.__setitem__(
+                "model_cmp", calls["model_cmp"] + 1)))
+        monkeypatch.setattr(
+            pfa.FEVisualizer, "plot_knockdown_curves",
+            staticmethod(lambda *a, **k: calls.__setitem__(
+                "kd_curves", calls["kd_curves"] + 1)))
+
+        monkeypatch.chdir(tmp_path)
+        pfa.main()
+
+        out = capsys.readouterr().out
+        assert "COMPLETE ANALYSIS FINISHED" in out
+        # main() sweeps 5 porosity levels: one compare + save + model
+        # comparison each, then a single overall knockdown-curves figure.
+        assert calls["compare"] == 5
+        assert calls["save"] == 5
+        assert calls["model_cmp"] == 5
+        assert calls["kd_curves"] == 1
+
+
+class TestStreamlitAppRender:
+    """End-to-end coverage of app._render() via streamlit's AppTest harness.
+    Exercises the sidebar, the invalid-layup early return, a full FE-backed
+    run across every tab, and the ILSS FE-skip warnings."""
+
+    @staticmethod
+    def _app_path():
+        import app
+        return app.__file__
+
+    def _fresh(self):
+        from streamlit.testing.v1 import AppTest
+        return AppTest.from_file(self._app_path(), default_timeout=120)
+
+    def test_initial_render_shows_placeholders(self):
+        at = self._fresh()
+        at.run()
+        assert not at.exception
+        assert at.title[0].value.startswith("PorosityFE")
+        # No analysis yet -> the "No results yet" info + tab placeholders.
+        assert len(at.button) == 1  # the "Run analysis" button
+        assert any("No results yet" in i.value for i in at.info)
+
+    def test_invalid_layup_shows_error_and_returns_early(self):
+        at = self._fresh()
+        at.run()
+        at.text_input[0].set_value("").run()
+        assert not at.exception
+        assert any("Invalid layup" in e.value for e in at.error)
+
+    def test_full_run_populates_all_tabs(self):
+        at = self._fresh()
+        at.run()
+        at.toggle[0].set_value(True).run()          # Expert mode -> sliders
+        for i in range(3):
+            at.slider[i].set_value(2)               # tiny mesh -> fast FE
+        at.text_input[0].set_value("[0/90]")
+        at.run()
+        at.button[0].click().run()
+        assert not at.exception
+        assert "result" in at.session_state
+        result = at.session_state["result"]
+        assert result is not None
+        assert result.get("fe_field") is not None   # compression -> FE ran
+        assert any("Last run" in s.value for s in at.success)
+        # The Export tab built both download payloads and the JSON preview.
+        assert len(list(at.get("download_button"))) == 2
+        assert at.code[0].value.strip().startswith("{")
+
+    def test_ilss_run_reports_fe_skip(self):
+        at = self._fresh()
+        at.run()
+        at.toggle[0].set_value(True).run()
+        for i in range(3):
+            at.slider[i].set_value(2)
+        at.text_input[0].set_value("[0/90]")
+        # selectbox order: Material, Distribution, Void shape, Loading mode.
+        at.selectbox[3].set_value("ilss")
+        at.run()
+        at.button[0].click().run()
+        assert not at.exception
+        result = at.session_state["result"]
+        assert result is not None and result.get("fe_field") is None
+        assert any("FE" in w.value and "ilss" in w.value
+                   for w in at.warning)
