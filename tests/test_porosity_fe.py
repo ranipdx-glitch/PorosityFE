@@ -2656,3 +2656,205 @@ class TestRunAnalysis:
         from app import run_analysis
         with pytest.raises(ValueError, match="Unknown material"):
             run_analysis(self._cfg(material_name="unobtanium_epoxy"))
+
+
+# ======================================================================
+# Tier 2: scientific-correctness gaps in porosity_fe_analysis.py
+#
+# These exercise paths where a wrong number — not a crash — is the
+# failure mode: the y-axis coordinate transforms, the off-default
+# Mori-Tanaka axisymmetry branches, the SCF shape branches, the FE/
+# Tsai-Wu numerical guardrails, and the input-validation raises.
+# ======================================================================
+
+
+class TestCoordinateTransformsYAxis:
+    """The y-axis transform branch (wrinkle/waviness misalignment) was only
+    ever invoked for rotation_matrix_3d. The 6x6 stress/strain transforms
+    and rotate_stiffness_3d were never tested off the z-axis, so the y-branch
+    Voigt algebra was unverified."""
+
+    def test_stress_transform_y_identity_at_zero(self):
+        T = stress_transformation_3d(0.0, axis='y')
+        np.testing.assert_allclose(T, np.eye(6), atol=1e-15)
+
+    def test_strain_transform_y_identity_at_zero(self):
+        T = strain_transformation_3d(0.0, axis='y')
+        np.testing.assert_allclose(T, np.eye(6), atol=1e-15)
+
+    def test_stress_strain_y_energy_consistency(self):
+        # Work conjugacy: sigma^T eps is frame-invariant, which requires
+        # T_sigma^T @ T_eps = I for a valid Voigt transform pair.
+        theta = np.deg2rad(33.0)
+        Ts = stress_transformation_3d(theta, axis='y')
+        Te = strain_transformation_3d(theta, axis='y')
+        np.testing.assert_allclose(Ts.T @ Te, np.eye(6), atol=1e-12)
+
+    def test_rotate_stiffness_y_leaves_isotropic_invariant(self):
+        # An isotropic tensor is invariant under ANY rotation; if the
+        # y-branch algebra were wrong this would not hold.
+        C_iso = MATERIALS['T800_epoxy'].get_isotropic_matrix_stiffness()
+        C_rot = rotate_stiffness_3d(C_iso, np.deg2rad(37.0), axis='y')
+        np.testing.assert_allclose(C_rot, C_iso, atol=1e-6)
+
+    def test_rotate_stiffness_y_round_trip(self):
+        # Rotating an orthotropic C by +theta then -theta about y returns C.
+        C = MATERIALS['T800_epoxy'].get_stiffness_matrix()
+        theta = np.deg2rad(25.0)
+        C_fwd = rotate_stiffness_3d(C, theta, axis='y')
+        C_back = rotate_stiffness_3d(C_fwd, -theta, axis='y')
+        np.testing.assert_allclose(C_back, C, atol=1e-6)
+        assert not np.allclose(C_fwd, C)  # the rotation actually did something
+
+    def test_stress_transform_invalid_axis_raises(self):
+        with pytest.raises(ValueError, match="Unsupported axis"):
+            stress_transformation_3d(0.1, axis='x')
+
+    def test_strain_transform_invalid_axis_raises(self):
+        # strain transform delegates to stress transform, so a bad axis
+        # must propagate the same ValueError.
+        with pytest.raises(ValueError, match="Unsupported axis"):
+            strain_transformation_3d(0.1, axis='w')
+
+
+class TestMTAxisymmetryBranches:
+    """The bundled VOID_SHAPES only ever hit the unique-axis-=-x1 and
+    unique-axis-=-x3 Eshelby branches. The middle-axis branch, the triaxial
+    fallback, and the Vp->1 short-circuit were never exercised."""
+
+    def setup_method(self):
+        from porosity_fe_analysis import _mt_cache_clear
+        _mt_cache_clear()
+        self.C_m = MATERIALS['T800_epoxy'].get_isotropic_matrix_stiffness()
+
+    def test_full_saturation_returns_zero_stiffness(self):
+        # Vp > 0.99 short-circuit (the void-saturated limit).
+        C_eff = _mt_effective_stiffness(self.C_m, 0.995, (1, 1, 1), 0.35)
+        np.testing.assert_array_equal(C_eff, np.zeros((6, 6)))
+
+    def test_middle_axis_symmetry_branch(self):
+        # r[0] ~ r[2], r[1] is the unique axis -> idx_axis = 1 and the
+        # x1<->x2 Voigt permutation. Result must stay finite and SPD-ish.
+        C_eff = _mt_effective_stiffness(self.C_m, 0.03, (1.0, 3.0, 1.0), 0.35)
+        assert C_eff.shape == (6, 6)
+        assert np.all(np.isfinite(C_eff))
+        assert C_eff[1, 1] < self.C_m[1, 1]
+        # Symmetry axis is x2, so the two equatorial directions x1 and x3
+        # degrade equally (transverse isotropy about x2).
+        deg_xx = (self.C_m[0, 0] - C_eff[0, 0]) / self.C_m[0, 0]
+        deg_zz = (self.C_m[2, 2] - C_eff[2, 2]) / self.C_m[2, 2]
+        assert abs(deg_xx - deg_zz) < 1e-6
+
+    def test_triaxial_fallback_branch(self):
+        # No two radii close -> triaxial prolate fallback (largest = axis).
+        C_eff = _mt_effective_stiffness(self.C_m, 0.03, (1.0, 2.0, 4.0), 0.35)
+        assert C_eff.shape == (6, 6)
+        assert np.all(np.isfinite(C_eff))
+        assert C_eff[0, 0] < self.C_m[0, 0]
+
+
+class TestSCFShapeBranches:
+    """VoidGeometry.stress_concentration_factor: the prolate-cylindrical
+    branch and the radii[0] <= radii[2] fallthrough were uncovered."""
+
+    def test_prolate_cylindrical_branch(self):
+        # radii=(3,1,1): ar=3 (>=1.2), r0>r2, r1 < 0.5*r0 -> cylindrical.
+        scf = VoidGeometry((0, 0, 0), (3.0, 1.0, 1.0)).stress_concentration_factor()
+        assert set(scf) == {'compression', 'tension', 'shear', 'ilss'}
+        # Branch formula: compression = 1.5 + 0.5 * ar, ar = 3.0.
+        assert scf['compression'] == pytest.approx(1.5 + 0.5 * 3.0)
+
+    def test_short_first_radius_fallthrough(self):
+        # radii=(1,1,3): ar=3 (>=1.2) but r0 <= r2 -> generic else branch.
+        scf = VoidGeometry((0, 0, 0), (1.0, 1.0, 3.0)).stress_concentration_factor()
+        assert scf == {'compression': 2.0, 'tension': 2.0,
+                       'shear': 1.5, 'ilss': 1.8}
+
+
+class TestSolverGuardrails:
+    """FESolver.solve and _evaluate_tsai_wu have defensive guards that stop
+    a corrupted run from emitting a plausible-but-wrong number. They were
+    never reached because a healthy small mesh never trips them."""
+
+    def setup_method(self):
+        self.material = MATERIALS['T800_epoxy']
+        self.pf = PorosityField(self.material, 0.03, distribution='uniform')
+        self.mesh = CompositeMesh(self.pf, self.material, nx=3, ny=2, nz=2)
+
+    def test_non_finite_solution_raises_runtime_error(self, monkeypatch):
+        import scipy.sparse.linalg
+        solver = FESolver(self.mesh, self.material, self.pf)
+
+        def fake_spsolve(A, b):
+            return np.full(b.shape[0], np.nan)
+
+        monkeypatch.setattr(scipy.sparse.linalg, 'spsolve', fake_spsolve)
+        with pytest.raises(RuntimeError, match="non-finite"):
+            solver.solve(loading='compression', applied_strain=-0.001)
+
+    def test_high_residual_raises_runtime_error(self, monkeypatch):
+        import scipy.sparse.linalg
+        solver = FESolver(self.mesh, self.material, self.pf)
+
+        def fake_spsolve(A, b):
+            # Finite but not a solution of Ku=F -> large relative residual.
+            return np.zeros(b.shape[0])
+
+        monkeypatch.setattr(scipy.sparse.linalg, 'spsolve', fake_spsolve)
+        with pytest.raises(RuntimeError, match="residual"):
+            solver.solve(loading='compression', applied_strain=-0.001)
+
+    def test_tsai_wu_rejects_non_finite_porosity(self):
+        solver = FESolver(self.mesh, self.material, self.pf)
+        solver.mesh.porosity = solver.mesh.porosity.copy()
+        solver.mesh.porosity[0] = np.nan
+        with pytest.raises(ValueError, match="non-finite"):
+            solver._evaluate_tsai_wu(np.zeros((1, 1, 6)))
+
+    def test_tsai_wu_rejects_non_finite_failure_index(self):
+        solver = FESolver(self.mesh, self.material, self.pf)
+        # Porosity is finite (passes the first guard); infinite stress makes
+        # the failure-index polynomial non-finite (the second guard).
+        bad_stress = np.full((self.mesh.n_elements, 8, 6), np.inf)
+        with pytest.raises(ValueError, match="non-finite"):
+            solver._evaluate_tsai_wu(bad_stress)
+
+
+class TestInputValidationRaises:
+    """Cheap 'rejects bad input' coverage for the validation raises that
+    no happy-path test reaches."""
+
+    def test_void_geometry_wrong_center_shape(self):
+        with pytest.raises(ValueError, match="3 components"):
+            VoidGeometry((0.0, 0.0), (1.0, 1.0, 1.0))
+
+    def test_void_geometry_non_finite_center(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            VoidGeometry((np.nan, 0.0, 0.0), (1.0, 1.0, 1.0))
+
+    def test_porosity_field_unknown_distribution_after_mutation(self):
+        # The constructor validates distribution; this guards the internal
+        # dispatch against later mutation.
+        pf = PorosityField(MATERIALS['T800_epoxy'], 0.03, distribution='uniform')
+        pf.distribution = 'bogus'
+        with pytest.raises(ValueError, match="Unknown distribution"):
+            pf._distributed_porosity(np.linspace(0.0, 0.1, 5))
+
+    def test_coefficient_override_non_numeric_value_raises(self):
+        with pytest.raises(TypeError, match="must be a number"):
+            EmpiricalSolver._merge_coefficient_override(
+                EmpiricalSolver._JUDD_WRIGHT_ALPHA_QI,
+                {'compression': 'oops'},
+                'judd_wright_alpha',
+            )
+
+    def test_save_results_rejects_envelope_key_collision(self, tmp_path):
+        path = str(tmp_path / "collide.json")
+        with pytest.raises(ValueError, match="collides"):
+            save_results_to_json({'format': {'anything': 1}}, path)
+
+    def test_load_results_rejects_non_object_top_level(self, tmp_path):
+        path = tmp_path / "list.json"
+        path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+        with pytest.raises(ValueError, match="expected a JSON object"):
+            load_results_from_json(str(path))
