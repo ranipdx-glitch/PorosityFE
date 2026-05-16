@@ -4051,6 +4051,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 Vp,
                 material_name=args.material,
                 applied_stress=args.applied_stress,
+                seed=args.seed,
             )
         except ValueError as exc:
             print(f"ERROR: bad input for Vp={Vp}: {exc}", file=sys.stderr)

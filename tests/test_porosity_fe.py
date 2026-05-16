@@ -2719,6 +2719,22 @@ class TestCLIMain:
         assert data['format'] == FORMAT_EMPIRICAL_SWEEP
         assert 'uniform_spherical' in data
 
+    def test_seed_is_recorded_in_provenance(self, tmp_path, monkeypatch):
+        # Regression for #79: --seed must reach provenance, not be dropped.
+        import json
+        monkeypatch.setattr(porosity_fe_analysis, 'POROSITY_CONFIGS',
+                            _TINY_CONFIGS)
+        rc = porosity_fe_analysis.main([
+            '--vp', '0.03',
+            '--seed', '12345',
+            '--output-dir', str(tmp_path),
+            '--quiet',
+        ])
+        assert rc == 0
+        out_file = tmp_path / 'porosity_analysis_results_3pct.json'
+        payload = json.loads(out_file.read_text(encoding='utf-8'))
+        assert payload['provenance']['seed'] == 12345
+
     def test_default_cwd_when_no_output_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(porosity_fe_analysis, 'POROSITY_CONFIGS',
                             _TINY_CONFIGS)
