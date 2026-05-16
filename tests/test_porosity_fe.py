@@ -27,6 +27,8 @@ from porosity_fe_analysis import (MaterialProperties, MATERIALS, VoidGeometry, V
                                    _build_provenance, load_results_from_json,
                                    JSON_SCHEMA_VERSION, FORMAT_EMPIRICAL_SWEEP)
 
+import porosity_fe_analysis
+
 
 class TestMaterialProperties:
     def test_dataclass_creation(self):
@@ -2489,3 +2491,70 @@ class TestProvenanceInFEExportResults:
         assert isinstance(prov['timestamp_utc'], str) and prov['timestamp_utc']
         assert 'porosity_fe_version' in prov
         assert data['schema_version'] == '1.0'
+
+
+# Tiny single-config dict keeps the argparse-driver tests fast (#58).
+_TINY_CONFIGS = {'uniform_spherical': {'distribution': 'uniform',
+                                       'void_shape': 'spherical'}}
+
+
+class TestCLIMain:
+    """Argparse-driven entry point (issue #58)."""
+
+    def test_help_exits_zero(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            porosity_fe_analysis.main(['--help'])
+        assert exc.value.code == 0
+        assert 'porosity-analyze' in capsys.readouterr().out
+
+    def test_list_materials(self, capsys):
+        assert porosity_fe_analysis.main(['--list-materials']) == 0
+        out = capsys.readouterr().out
+        assert 'T800_epoxy' in out
+
+    def test_unknown_material_errors(self):
+        with pytest.raises(SystemExit) as exc:
+            porosity_fe_analysis.main(['--material', 'unobtainium'])
+        assert exc.value.code == 2
+
+    def test_out_of_range_vp_errors(self):
+        with pytest.raises(SystemExit) as exc:
+            porosity_fe_analysis.main(['--vp', '1.5'])
+        assert exc.value.code == 2
+
+    def test_single_vp_writes_roundtrippable_json(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(porosity_fe_analysis, 'POROSITY_CONFIGS',
+                            _TINY_CONFIGS)
+        rc = porosity_fe_analysis.main([
+            '--material', 'T800_epoxy',
+            '--vp', '0.03',
+            '--output-dir', str(tmp_path),
+            '--quiet',
+        ])
+        assert rc == 0
+        out_file = tmp_path / 'porosity_analysis_results_3pct.json'
+        assert out_file.exists()
+        data = load_results_from_json(str(out_file))
+        assert data['schema_version'] == JSON_SCHEMA_VERSION
+        assert data['format'] == FORMAT_EMPIRICAL_SWEEP
+        assert 'uniform_spherical' in data
+
+    def test_default_cwd_when_no_output_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(porosity_fe_analysis, 'POROSITY_CONFIGS',
+                            _TINY_CONFIGS)
+        monkeypatch.chdir(tmp_path)
+        rc = porosity_fe_analysis.main(['--vp', '0.02', '--quiet'])
+        assert rc == 0
+        assert (tmp_path / 'porosity_analysis_results_2pct.json').exists()
+
+    def test_non_integer_vp_label_no_collision(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(porosity_fe_analysis, 'POROSITY_CONFIGS',
+                            _TINY_CONFIGS)
+        rc = porosity_fe_analysis.main([
+            '--vp', '0.025',
+            '--output-dir', str(tmp_path),
+            '--quiet',
+        ])
+        assert rc == 0
+        assert (tmp_path / 'porosity_analysis_results_2p5pct.json').exists()

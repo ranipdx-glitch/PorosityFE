@@ -20,7 +20,9 @@ Dependencies:
     pip install numpy scipy matplotlib
 """
 
+import argparse
 import logging
+import os
 
 import numpy as np
 import scipy.sparse
@@ -3349,47 +3351,191 @@ def load_results_from_json(filename: str) -> Dict:
     return data
 
 
-def main():
-    """Entry point — loops over porosity severity levels."""
-    porosity_levels = [0.01, 0.02, 0.03, 0.05, 0.08]
+# Default Vp sweep — preserves the historical hardcoded behavior so that
+# `porosity-analyze` with no arguments reproduces today's analysis range.
+DEFAULT_POROSITY_LEVELS = [0.01, 0.02, 0.03, 0.05, 0.08]
+
+
+def _vp_label(Vp: float) -> str:
+    """Stable, filesystem-safe label for a void fraction.
+
+    Integer-percent fractions keep the legacy ``Npct`` form (e.g. 0.03 ->
+    ``3pct``); non-integer fractions fall back to a decimal-derived form
+    (e.g. 0.025 -> ``2p5pct``) so distinct sweeps never collide.
+    """
+    pct = Vp * 100.0
+    if abs(pct - round(pct)) < 1e-9:
+        return f"{int(round(pct))}pct"
+    return f"{pct:.4f}".rstrip('0').rstrip('.').replace('.', 'p') + "pct"
+
+
+def _build_arg_parser() -> 'argparse.ArgumentParser':
+    """Construct the argparse driver for the analysis pipeline."""
+    parser = argparse.ArgumentParser(
+        prog="porosity-analyze",
+        description=(
+            "Run the porosity-degraded composite laminate analysis over one "
+            "or more void volume fractions and write JSON results."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--material",
+        default="T800_epoxy",
+        help="Material preset name (validated against the built-in presets).",
+    )
+    parser.add_argument(
+        "--vp",
+        type=float,
+        nargs="+",
+        default=list(DEFAULT_POROSITY_LEVELS),
+        metavar="VP",
+        help=(
+            "One or more void volume fractions in [0, 1]. Defaults to the "
+            "historical sweep."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=".",
+        help="Directory to write JSON results into (created if missing).",
+    )
+    parser.add_argument(
+        "--applied-stress",
+        type=float,
+        default=-1500.0,
+        help="Applied stress (MPa) passed to compare_configurations.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Recorded in JSON provenance for reproducibility. The pipeline "
+            "is deterministic (RNG-free), so this does not alter results."
+        ),
+    )
+    parser.add_argument(
+        "--plots",
+        action="store_true",
+        help=(
+            "Also render the heavy matplotlib figures (PNG). Off by default "
+            "to keep CI / batch runs fast."
+        ),
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-configuration progress output.",
+    )
+    parser.add_argument(
+        "--list-materials",
+        action="store_true",
+        help="List the available material presets and exit.",
+    )
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Argparse-driven entry point.
+
+    Returns
+    -------
+    int
+        ``0`` on success, ``2`` on bad input, ``3`` on a solver failure.
+    """
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.list_materials:
+        for name in sorted(MATERIALS):
+            print(name)
+        return 0
+
+    if args.material not in MATERIALS:
+        parser.error(
+            f"Unknown material {args.material!r}. "
+            f"Available presets: {sorted(MATERIALS)}."
+        )
+
+    for Vp in args.vp:
+        if not (0.0 <= Vp <= 1.0) or Vp != Vp:  # NaN-safe range check
+            parser.error(
+                f"--vp value {Vp!r} is out of range; expected a finite "
+                f"float in [0, 1] (a void *fraction*, not a percentage)."
+            )
+
+    output_dir = args.output_dir
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"ERROR: cannot create output directory {output_dir!r}: {exc}",
+              file=sys.stderr)
+        return 2
+
+    def _log(msg: str) -> None:
+        if not args.quiet:
+            print(msg)
 
     all_results = {}
-    for Vp in porosity_levels:
-        Vp_label = f"{int(Vp*100)}pct"
-        results = compare_configurations(Vp)
+    for Vp in args.vp:
+        Vp_label = _vp_label(Vp)
+        try:
+            results = compare_configurations(
+                Vp,
+                material_name=args.material,
+                applied_stress=args.applied_stress,
+            )
+        except ValueError as exc:
+            print(f"ERROR: bad input for Vp={Vp}: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - surface as solver failure
+            print(f"ERROR: solver failure for Vp={Vp}: {exc}", file=sys.stderr)
+            return 3
         all_results[Vp_label] = results
 
-        for name in results:
-            FEVisualizer.plot_porosity_field(
-                results[name]['porosity_field'],
-                save_path=f"porosity_profile_{name}_{Vp_label}.png")
-            FEVisualizer.plot_mesh_3d(
-                results[name]['mesh'],
-                save_path=f"porosity_mesh_3d_{name}_{Vp_label}.png")
-            FEVisualizer.plot_mesh_detail(
-                results[name]['mesh'],
-                save_path=f"porosity_mesh_detail_{name}_{Vp_label}.png")
-            FEVisualizer.plot_damage_contour(
-                results[name]['mesh'],
-                results[name]['empirical_solver'],
-                save_path=f"porosity_damage_{name}_{Vp_label}.png")
+        if args.plots:
+            for name in results:
+                FEVisualizer.plot_porosity_field(
+                    results[name]['porosity_field'],
+                    save_path=os.path.join(
+                        output_dir, f"porosity_profile_{name}_{Vp_label}.png"))
+                FEVisualizer.plot_mesh_3d(
+                    results[name]['mesh'],
+                    save_path=os.path.join(
+                        output_dir, f"porosity_mesh_3d_{name}_{Vp_label}.png"))
+                FEVisualizer.plot_mesh_detail(
+                    results[name]['mesh'],
+                    save_path=os.path.join(
+                        output_dir, f"porosity_mesh_detail_{name}_{Vp_label}.png"))
+                FEVisualizer.plot_damage_contour(
+                    results[name]['mesh'],
+                    results[name]['empirical_solver'],
+                    save_path=os.path.join(
+                        output_dir, f"porosity_damage_{name}_{Vp_label}.png"))
+            FEVisualizer.plot_model_comparison(
+                results,
+                save_path=os.path.join(
+                    output_dir, f"porosity_comparison_{Vp_label}.png"))
 
-        FEVisualizer.plot_model_comparison(
-            results,
-            save_path=f"porosity_comparison_{Vp_label}.png")
+        out_path = os.path.join(
+            output_dir, f"porosity_analysis_results_{Vp_label}.json")
+        save_results_to_json(results, out_path)
 
-        save_results_to_json(results, f"porosity_analysis_results_{Vp_label}.json")
+    if args.plots and all_results:
+        FEVisualizer.plot_knockdown_curves(
+            all_results,
+            save_path=os.path.join(output_dir, "porosity_knockdown_curves.png"))
 
-    FEVisualizer.plot_knockdown_curves(
-        all_results,
-        save_path="porosity_knockdown_curves.png")
-
-    print(f"\n{'='*70}")
-    print("COMPLETE ANALYSIS FINISHED")
-    print(f"{'='*70}")
-    print(f"Porosity levels analyzed: {[f'{v*100:.0f}%' for v in porosity_levels]}")
-    print(f"Configurations: {list(POROSITY_CONFIGS.keys())}")
+    _log(f"\n{'='*70}")
+    _log("COMPLETE ANALYSIS FINISHED")
+    _log(f"{'='*70}")
+    _log(f"Material: {args.material}")
+    _log(f"Porosity levels analyzed: {[f'{v*100:.2f}%' for v in args.vp]}")
+    _log(f"Configurations: {list(POROSITY_CONFIGS.keys())}")
+    _log(f"Output directory: {os.path.abspath(output_dir)}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
