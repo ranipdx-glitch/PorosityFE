@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Porosity Analysis Results",
+  "description": "Output contract for save_results_to_json / FESolver.export_results / the Streamlit exporters. The envelope (schema_version, format, provenance) is validated strictly so consumers can detect version/contract drift; the science payload is intentionally permissive so adding result fields is not a breaking schema change.",
+  "type": "object",
+  "required": ["schema_version", "format", "provenance"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "format": {
+      "type": "string",
+      "enum": ["porosity-fe.empirical-sweep", "porosity-fe.fe-fields"]
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "porosity_fe_version",
+        "python_version",
+        "platform",
+        "numpy_version",
+        "scipy_version",
+        "timestamp_utc",
+        "seed",
+        "git_commit"
+      ],
+      "properties": {
+        "porosity_fe_version": {"type": ["string", "null"]},
+        "python_version": {"type": "string"},
+        "platform": {"type": "string"},
+        "numpy_version": {"type": ["string", "null"]},
+        "scipy_version": {"type": ["string", "null"]},
+        "matplotlib_version": {"type": ["string", "null"]},
+        "timestamp_utc": {"type": "string"},
+        "seed": {"type": ["integer", "null"]},
+        "git_commit": {"type": ["string", "null"]}
+      }
+    }
+  },
+  "additionalProperties": true
+}

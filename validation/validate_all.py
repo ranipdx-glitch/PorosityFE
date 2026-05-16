@@ -399,7 +399,9 @@ def generate_master_report(results: Dict[str, Any], output_dir: str = None):
     ax.grid(True, alpha=0.3, axis='y')
     plt.tight_layout()
     plot_path = os.path.join(output_dir, 'validation_master_report.png')
-    plt.savefig(plot_path, dpi=200, bbox_inches='tight')
+    # dpi=300 to match every other static PNG in the project (#53);
+    # bbox/dpi defaults also come from porosity_fe_analysis._apply_plot_style.
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
     md_lines = ['# Master Validation Report', '']

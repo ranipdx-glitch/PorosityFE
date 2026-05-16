@@ -44,22 +44,75 @@ logger = logging.getLogger(__name__)
 # PLOT STYLE — applied once at import time
 # ============================================================
 
-def _apply_plot_style():
-    """Set shared rcParams for all plots: fonts, DPI, line widths, grid."""
+# Axis / colorbar label text, centralized so the Streamlit app and the
+# static-PNG path cannot drift apart on units (#53).
+LABELS = {
+    'porosity_pct': 'Porosity (%)',
+    'x_mm': 'x (mm)',
+    'z_mm': 'z (mm)',
+    'stiffness_retention_pct': 'Stiffness Retention (%)',
+    'knockdown_factor': 'Knockdown Factor (-)',
+    'scf': 'Stress Concentration Factor (-)',
+}
+
+
+def _apply_plot_style(preset: str = 'default'):
+    """Set shared rcParams for all plots: fonts, DPI, colormap, grid.
+
+    ``preset='publication'`` bumps font sizes and emits vector PDF for
+    paper figures; ``'default'`` is the screen/README raster style (#53).
+    """
     import matplotlib
-    matplotlib.rcParams.update({
+    base = {
         'font.family': 'sans-serif',
         'font.size': 11,
         'axes.titlesize': 14,
         'axes.labelsize': 12,
+        'legend.fontsize': 9,
         'lines.linewidth': 1.5,
         'axes.grid': True,
         'grid.alpha': 0.3,
+        'image.cmap': 'viridis',
         'savefig.dpi': 300,
         'savefig.bbox': 'tight',
-    })
+    }
+    if preset == 'publication':
+        base.update({
+            'font.size': 13,
+            'axes.titlesize': 16,
+            'axes.labelsize': 14,
+            'legend.fontsize': 11,
+            'savefig.format': 'pdf',
+        })
+    matplotlib.rcParams.update(base)
 
 _apply_plot_style()
+
+
+try:
+    import importlib.metadata as _ilm
+    __version__ = _ilm.version("porosity-fe")
+except Exception:
+    # Source checkout that isn't pip-installed. Keep in sync with
+    # pyproject.toml on each release.
+    __version__ = "1.2.0"
+
+
+def _json_default(o):
+    """json.dump ``default=`` hook: make numpy scalars/arrays serializable.
+
+    The science payload is already float()-wrapped, but user-supplied
+    fields (e.g. ndarray ply_angles) would otherwise raise TypeError (#20).
+    """
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, (datetime.datetime, datetime.date)):
+        return o.isoformat()
+    raise TypeError(
+        f"Object of type {type(o).__name__} is not JSON serializable"
+    )
 
 # ============================================================
 # SECTION 1: MATERIAL PROPERTIES AND CONSTANTS
@@ -393,7 +446,8 @@ class PorosityField:
     def __init__(self, material: MaterialProperties, void_volume_fraction: float,
                  distribution: str = 'uniform', void_shape: Union[str, Tuple] = 'spherical',
                  cluster_location: str = 'midplane',
-                 discrete_voids: Optional[List[VoidGeometry]] = None):
+                 discrete_voids: Optional[List[VoidGeometry]] = None,
+                 seed: Optional[int] = None):
         if void_volume_fraction is None:
             raise ValueError("void_volume_fraction is None; expected a finite float in [0, 1].")
         if not isinstance(void_volume_fraction, (int, float, np.floating, np.integer)):
@@ -433,6 +487,10 @@ class PorosityField:
         self.distribution = distribution
         self.cluster_location = cluster_location
         self.discrete_voids = discrete_voids or []
+        # The pipeline is RNG-free today; `seed` is recorded into provenance
+        # so a future stochastic void-placement mode has a determinism
+        # contract to honor (#55).
+        self.seed = seed
         self.Lz = material.total_thickness
 
         # Resolve void shape
@@ -1223,7 +1281,7 @@ class FEVisualizer:
         field = np.where(dist < 0, 0, 1.0 + (scf_max - 1) * np.exp(-dist / max(void_geometry.radii)))
 
         im = ax.contourf(X, Y, field, levels=30, cmap='plasma')
-        plt.colorbar(im, ax=ax, label='Stress Concentration Factor')
+        plt.colorbar(im, ax=ax, label=LABELS['scf'])
         ax.set_xlabel('x (mm)', fontsize=12)
         ax.set_ylabel('y (mm)', fontsize=12)
         ax.set_title(f'SCF Field (aspect ratio={void_geometry.aspect_ratio:.1f})',
@@ -1260,7 +1318,7 @@ class FEVisualizer:
                            alpha=0.7, linewidth=1.5)
 
             ax.set_xlabel('Porosity (%)', fontsize=11)
-            ax.set_ylabel('Knockdown Factor', fontsize=11)
+            ax.set_ylabel(LABELS['knockdown_factor'], fontsize=11)
             ax.set_title(mode.upper(), fontsize=13, fontweight='bold')
             ax.grid(True, alpha=0.3)
             ax.set_ylim(0, 1.1)
@@ -1286,7 +1344,7 @@ class FEVisualizer:
             axes[0].bar(x + i * width, vals, width, label=model.replace('_', ' ').title())
         axes[0].set_xticks(x + width)
         axes[0].set_xticklabels([c.replace('_', '\n') for c in configs], fontsize=8)
-        axes[0].set_ylabel('Knockdown Factor')
+        axes[0].set_ylabel(LABELS['knockdown_factor'])
         axes[0].set_title('Compression', fontsize=14, fontweight='bold')
         axes[0].legend(fontsize=8)
         axes[0].grid(True, alpha=0.3, axis='y')
@@ -1297,7 +1355,7 @@ class FEVisualizer:
             axes[1].bar(x + i * width, vals, width, label=model.replace('_', ' ').title())
         axes[1].set_xticks(x + width)
         axes[1].set_xticklabels([c.replace('_', '\n') for c in configs], fontsize=8)
-        axes[1].set_ylabel('Knockdown Factor')
+        axes[1].set_ylabel(LABELS['knockdown_factor'])
         axes[1].set_title('ILSS', fontsize=14, fontweight='bold')
         axes[1].legend(fontsize=8)
         axes[1].grid(True, alpha=0.3, axis='y')
@@ -3101,7 +3159,7 @@ class FESolver:
             **results_data,
         }
         with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(output, f, indent=2)
+            json.dump(output, f, indent=2, default=_json_default)
         print(f"Saved FE results: {filename}")
 
 
@@ -3112,7 +3170,8 @@ class FESolver:
 def compare_configurations(void_volume_fraction: float,
                            material_name: str = 'T800_epoxy',
                            applied_stress: float = -1500.0,
-                           configs: Optional[Dict] = None) -> Dict:
+                           configs: Optional[Dict] = None,
+                           seed: Optional[int] = None) -> Dict:
     """Main analysis function — loops through porosity configurations."""
     if material_name not in MATERIALS:
         raise ValueError(
@@ -3130,7 +3189,8 @@ def compare_configurations(void_volume_fraction: float,
 
     for name, config in configs.items():
         print(f"\n  Configuration: {name}")
-        porosity_field = PorosityField(material, void_volume_fraction, **config)
+        porosity_field = PorosityField(material, void_volume_fraction,
+                                       seed=seed, **config)
         mesh = CompositeMesh(porosity_field, material, nx=30, ny=10, nz=12)
 
         empirical = EmpiricalSolver(mesh, material)
@@ -3171,20 +3231,20 @@ FORMAT_FE_FIELDS = "porosity-fe.fe-fields"
 _KNOWN_FORMATS = {FORMAT_EMPIRICAL_SWEEP, FORMAT_FE_FIELDS}
 
 
-def _build_provenance() -> dict:
+def _build_provenance(seed: Optional[int] = None) -> dict:
     """Return a provenance metadata dict for JSON output reproducibility.
 
-    Captures software versions, platform, timestamp, and optional git commit
-    so that any JSON output can be traced back to the exact environment used.
+    Captures software versions, platform, timestamp, optional git commit,
+    and the run ``seed`` so that any JSON output can be traced back to the
+    exact environment used (#55).
     """
     try:
         import importlib.metadata as _ilm
         pfe_version: Optional[str] = _ilm.version("porosity-fe")
     except Exception:
-        # Fall back to the module-level attribute when not installed via pip
-        pfe_version = getattr(
-            sys.modules.get("porosity_fe_analysis"), "__version__", None
-        )
+        # Source checkout not pip-installed: use the importable module
+        # attribute (defined at the top of this file).
+        pfe_version = __version__
 
     vi = sys.version_info
     python_version = f"{vi.major}.{vi.minor}.{vi.micro}"
@@ -3210,17 +3270,23 @@ def _build_provenance() -> dict:
         "scipy_version": _pkg_version("scipy"),
         "matplotlib_version": _pkg_version("matplotlib"),
         "timestamp_utc": datetime.datetime.utcnow().isoformat() + "Z",
-        "seed": None,
+        "seed": seed,
         "git_commit": git_commit,
     }
 
 
 def save_results_to_json(results: Dict, filename: str):
     """Export numerical results to JSON."""
+    # All configs in a sweep share one seed; record it iff unambiguous.
+    seeds = {
+        getattr(d.get('porosity_field'), 'seed', None)
+        for d in results.values() if isinstance(d, dict)
+    }
+    seed = seeds.pop() if len(seeds) == 1 else None
     output = {
         'schema_version': JSON_SCHEMA_VERSION,
         'format': FORMAT_EMPIRICAL_SWEEP,
-        'provenance': _build_provenance(),
+        'provenance': _build_provenance(seed=seed),
     }
     for name, data in results.items():
         if name in ('schema_version', 'format'):
@@ -3246,7 +3312,7 @@ def save_results_to_json(results: Dict, filename: str):
         output[name] = entry
 
     with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(output, f, indent=2)
+        json.dump(output, f, indent=2, default=_json_default)
     print(f"Saved: {filename}")
 
 

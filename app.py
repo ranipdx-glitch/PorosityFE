@@ -137,14 +137,18 @@ def build_export_payload(result: dict) -> dict:
 
 
 def write_results_json(filepath: str, payload: dict) -> None:
-    from porosity_fe_analysis import FORMAT_EMPIRICAL_SWEEP, JSON_SCHEMA_VERSION
+    from porosity_fe_analysis import (
+        FORMAT_EMPIRICAL_SWEEP, JSON_SCHEMA_VERSION,
+        _build_provenance, _json_default,
+    )
     envelope = {
         "schema_version": JSON_SCHEMA_VERSION,
         "format": FORMAT_EMPIRICAL_SWEEP,
+        "provenance": _build_provenance(),
         **payload,
     }
     with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(envelope, f, indent=2)
+        json.dump(envelope, f, indent=2, default=_json_default)
 
 
 def write_results_csv(filepath: str, payload: dict) -> None:
@@ -170,13 +174,17 @@ def write_results_csv(filepath: str, payload: dict) -> None:
 
 
 def _serialise_payload_json(payload: dict) -> str:
-    from porosity_fe_analysis import FORMAT_EMPIRICAL_SWEEP, JSON_SCHEMA_VERSION
+    from porosity_fe_analysis import (
+        FORMAT_EMPIRICAL_SWEEP, JSON_SCHEMA_VERSION,
+        _build_provenance, _json_default,
+    )
     envelope = {
         "schema_version": JSON_SCHEMA_VERSION,
         "format": FORMAT_EMPIRICAL_SWEEP,
+        "provenance": _build_provenance(),
         **payload,
     }
-    return json.dumps(envelope, indent=2)
+    return json.dumps(envelope, indent=2, default=_json_default)
 
 
 def _serialise_payload_csv(payload: dict) -> str:
@@ -512,11 +520,15 @@ def plot_stress(result: dict, comp_name: str):
 
     finite_mask = np.isfinite(sv)
     if finite_mask.sum() >= 3:
-        vmin = np.percentile(sv[finite_mask], 5)
-        vmax = np.percentile(sv[finite_mask], 95)
+        # Symmetric range so RdBu_r's white midpoint is true σ=0; using raw
+        # 5/95 percentiles shifts the neutral color off zero and makes the
+        # sign visually misread (#51).
+        p5 = np.percentile(sv[finite_mask], 5)
+        p95 = np.percentile(sv[finite_mask], 95)
+        v = max(abs(p5), abs(p95)) or 1.0
         tcf = ax.tricontourf(cx[finite_mask], cz[finite_mask],
                              sv[finite_mask], levels=20, cmap="RdBu_r",
-                             vmin=vmin, vmax=vmax)
+                             vmin=-v, vmax=v)
         fig.colorbar(tcf, ax=ax, label=label)
     else:
         ax.text(0.5, 0.5, "Insufficient interior data for contour plot.",

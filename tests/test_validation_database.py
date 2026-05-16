@@ -406,3 +406,75 @@ def test_predict_strength_raises_for_transverse_tensile():
 
     with pytest.raises(ValueError, match='transverse_tensile_strength'):
         predict_strength(dataset, 'transverse_tensile_strength', [1.0, 2.0, 3.0])
+
+
+# ---------------------------------------------------------------------------
+# Issue #48 (item 3) — regression-pin per-dataset/property MAE
+#
+# The pipeline is RNG-free and deterministic (#55), so these baselines are
+# stable. Tolerance is rel=10% OR abs=0.5 (whichever is larger) so tiny-MAE
+# entries don't go flaky while real model drift on any dataset fails CI.
+# Regenerate with: python -c "from validation.validate_all import
+# run_all_datasets as r; ..." (see PR for the one-liner) only on an
+# intentional model change, and call it out in the PR.
+# ---------------------------------------------------------------------------
+
+_MAE_BASELINES = {
+    ('almeida_1994', 'ilss'): 6.897,
+    ('bowles_1992', 'ilss'): 3.019,
+    ('elhajjar_2025', 'compression_strength'): 5.643,
+    ('elhajjar_2025', 'tensile_strength'): 4.331,
+    ('ghiorse_1993', 'flexural_modulus'): 16.284,
+    ('ghiorse_1993', 'ilss'): 10.155,
+    ('jeong_1997', 'ilss'): 4.156,
+    ('liu_2006', 'flexural_modulus'): 7.707,
+    ('liu_2006', 'ilss'): 1.987,
+    ('liu_2006', 'tensile_modulus'): 1.808,
+    ('liu_2006', 'tensile_strength'): 1.581,
+    ('liu_2018', 'tensile_modulus'): 0.864,
+    ('liu_2018', 'tensile_strength'): 5.26,
+    ('liu_2018', 'transverse_tensile_modulus'): 3.286,
+    ('olivier_1995', 'flexural_modulus'): 10.55,
+    ('olivier_1995', 'ilss'): 1.554,
+    ('olivier_1995', 'tensile_strength'): 15.667,
+    ('stamopoulos_2016', 'flexural_modulus'): 2.314,
+    ('stamopoulos_2016', 'ilss'): 2.523,
+    ('stamopoulos_2016', 'shear_modulus'): 15.387,
+    ('stamopoulos_2016', 'shear_strength'): 4.353,
+    ('stamopoulos_2016', 'transverse_tensile_modulus'): 1.022,
+    ('tang_1987', 'flexural_modulus'): 7.933,
+    ('tang_1987', 'ilss'): 8.374,
+    ('tang_1987', 'tensile_strength'): 10.923,
+    ('wang_2022', 'tensile_modulus'): 1.336,
+    ('wang_2022', 'tensile_strength'): 12.801,
+    ('wen_2023', 'compression_strength'): 17.236,
+    ('wen_2023', 'ilss'): 5.704,
+    ('wen_2023', 'shear_strength'): 22.644,
+    ('wen_2023', 'tensile_strength'): 6.583,
+    ('zhang_peek_2025', 'transverse_tensile_modulus'): 5.96,
+}
+
+
+@pytest.fixture(scope="module")
+def _all_results():
+    """run_all_datasets is expensive (~30s); compute once for all 32 cases."""
+    import warnings
+    from validation.validate_all import run_all_datasets
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return run_all_datasets()
+
+
+@pytest.mark.parametrize("key", sorted(_MAE_BASELINES),
+                         ids=lambda k: f"{k[0]}:{k[1]}")
+def test_per_dataset_mae_regression_pinned(key, _all_results):
+    dataset, prop = key
+    baseline = _MAE_BASELINES[key]
+    assert dataset in _all_results, f"dataset {dataset!r} missing from results"
+    ds = _all_results[dataset]
+    assert 'error' not in ds, f"{dataset} errored: {ds.get('error')}"
+    assert prop in ds, f"{dataset!r} missing property {prop!r}"
+    mae = ds[prop]['mae']
+    assert mae == pytest.approx(baseline, rel=0.10, abs=0.5), (
+        f"{dataset}/{prop} MAE drifted: {mae:.3f} vs baseline {baseline:.3f}"
+    )

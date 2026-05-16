@@ -746,6 +746,82 @@ class TestAnalysisPipeline:
             load_results_from_json(str(path))
 
 
+class TestResultsSchemaAndReproducibility:
+    """#20 (output JSON Schema, numpy serialization) and #55 (__version__,
+    seed provenance, determinism contract)."""
+
+    _SCHEMA_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'validation', 'schemas', 'porosity_results_schema.json')
+
+    def _one_config_results(self):
+        return compare_configurations(
+            0.03, configs={'uniform_spherical':
+                           POROSITY_CONFIGS['uniform_spherical']})
+
+    def test_exported_file_validates_against_results_schema(self, tmp_path):
+        import jsonschema
+        with open(self._SCHEMA_PATH, encoding='utf-8') as f:
+            schema = json.load(f)
+        path = str(tmp_path / "schema_check.json")
+        save_results_to_json(self._one_config_results(), path)
+        with open(path, encoding='utf-8') as f:
+            doc = json.load(f)
+        jsonschema.validate(instance=doc, schema=schema)  # raises on drift
+
+    def test_module_has_importable_version(self):
+        import porosity_fe_analysis as pfa
+        assert isinstance(pfa.__version__, str) and pfa.__version__
+
+    def test_provenance_records_version_and_seed(self, tmp_path):
+        results = compare_configurations(
+            0.03, seed=4242,
+            configs={'uniform_spherical':
+                     POROSITY_CONFIGS['uniform_spherical']})
+        path = str(tmp_path / "prov.json")
+        save_results_to_json(results, path)
+        with open(path, encoding='utf-8') as f:
+            prov = json.load(f)['provenance']
+        assert prov['porosity_fe_version']  # no longer silently None
+        assert prov['seed'] == 4242
+
+    def test_pipeline_is_byte_deterministic(self, tmp_path):
+        """Locks in current determinism so any future RNG introduction is
+        forced to expose a seed (#55)."""
+        p1, p2 = str(tmp_path / "r1.json"), str(tmp_path / "r2.json")
+        save_results_to_json(self._one_config_results(), p1)
+        save_results_to_json(self._one_config_results(), p2)
+        with open(p1, encoding='utf-8') as f:
+            d1 = json.load(f)
+        with open(p2, encoding='utf-8') as f:
+            d2 = json.load(f)
+        # Two back-to-back runs in one process differ only by timestamp.
+        d1['provenance'].pop('timestamp_utc')
+        d2['provenance'].pop('timestamp_utc')
+        assert d1 == d2
+
+    def test_json_default_handles_numpy_and_ndarray(self, tmp_path):
+        from porosity_fe_analysis import _json_default
+        assert _json_default(np.float64(1.5)) == 1.5
+        assert _json_default(np.int64(7)) == 7
+        assert _json_default(np.array([1.0, 2.0])) == [1.0, 2.0]
+        # End-to-end: an ndarray smuggled into the payload must not raise.
+        # Replace the nested dicts with shallow copies — `config` aliases the
+        # shared POROSITY_CONFIGS entry, so mutating it in place would poison
+        # global state for other tests.
+        results = self._one_config_results()
+        entry = dict(results['uniform_spherical'])
+        entry['config'] = {**entry['config'],
+                           'ply_angles': np.array([0.0, 90.0, 45.0])}
+        results = {'uniform_spherical': entry}
+        path = str(tmp_path / "np.json")
+        save_results_to_json(results, path)  # would TypeError pre-#20
+        with open(path, encoding='utf-8') as f:
+            doc = json.load(f)
+        assert doc['uniform_spherical']['config']['ply_angles'] == [
+            0.0, 90.0, 45.0]
+
+
 class TestIntegration:
     """End-to-end test with reduced parameters for speed."""
 
@@ -1431,12 +1507,39 @@ class TestBoundaryHandler:
             assert abs(constrained[3 * int(nid)] - expected_disp) < 1e-10
 
     def test_tension_bcs(self):
-        constrained, F = self.handler.tension_bcs(applied_strain=0.01)
+        strain = 0.01
+        constrained, F = self.handler.tension_bcs(applied_strain=strain)
         assert len(constrained) > 0
+        assert len(F) == self.mesh.n_dof
+        # x_min: ux pinned to 0
+        for nid in self.mesh.nodes_on_face('x_min'):
+            assert constrained[3 * int(nid)] == 0.0
+        # x_max: ux = +strain * Lx (positive => tension, not compression)
+        expected = strain * self.mesh.L_x
+        assert expected > 0.0
+        for nid in self.mesh.nodes_on_face('x_max'):
+            assert abs(constrained[3 * int(nid)] - expected) < 1e-12
+        # y_min: uy pinned to 0 (symmetry)
+        for nid in self.mesh.nodes_on_face('y_min'):
+            assert constrained[3 * int(nid) + 1] == 0.0
 
     def test_shear_bcs(self):
-        constrained, F = self.handler.shear_bcs(applied_strain=0.01)
+        gamma = 0.01
+        constrained, F = self.handler.shear_bcs(applied_strain=gamma)
         assert len(constrained) > 0
+        assert len(F) == self.mesh.n_dof
+        nodes = self.mesh.nodes
+        # All four side faces must prescribe BOTH ux and uy to the pure-shear
+        # field u = gamma/2 * y, v = gamma/2 * x. A regression that swapped
+        # ux/uy on a face, or left a face traction-free, fails here.
+        for face in ('x_min', 'x_max', 'y_min', 'y_max'):
+            face_nodes = self.mesh.nodes_on_face(face)
+            assert len(face_nodes) > 0
+            for nid in face_nodes:
+                nid = int(nid)
+                x_n, y_n = float(nodes[nid, 0]), float(nodes[nid, 1])
+                assert abs(constrained[3 * nid] - (gamma / 2.0) * y_n) < 1e-12
+                assert abs(constrained[3 * nid + 1] - (gamma / 2.0) * x_n) < 1e-12
 
     def test_apply_penalty(self):
         import scipy.sparse
