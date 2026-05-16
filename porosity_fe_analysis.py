@@ -1140,7 +1140,7 @@ class EmpiricalSolver:
         model_func = _MODEL_FUNCS[model]
         kd = np.array([model_func(Vp, mode) for Vp in self.mesh.porosity])
         kd = self._apply_discrete_void_scf(kd, mode)
-        self.nodal_knockdown = kd
+        self.nodal_knockdown = kd  # type: ignore[assignment]  # lazy-init attr starts None
 
     def get_failure_load(self, mode: str = 'compression', model: str = 'judd_wright') -> dict:
         """Compute failure load using specimen-average porosity.
@@ -1552,7 +1552,7 @@ class FEVisualizer:
             for i in range(mesh.nx + 1):
                 idx = k * ny1 * nx1 + ny_mid * nx1 + i
                 indices.append(idx)
-        indices = np.array(indices)
+        indices = np.array(indices)  # type: ignore[assignment]  # list rebound to ndarray
         X = mesh.nodes[indices, 0].reshape(mesh.nz + 1, mesh.nx + 1)
         Z = mesh.nodes[indices, 2].reshape(mesh.nz + 1, mesh.nx + 1)
         P = mesh.porosity[indices].reshape(mesh.nz + 1, mesh.nx + 1)
@@ -3388,7 +3388,7 @@ class FESolver:
                 "vector. Check matrix conditioning and boundary conditions."
             )
         _r = K_mod @ u - F_mod
-        _rel_res = np.linalg.norm(_r) / max(np.linalg.norm(F_mod), 1.0)
+        _rel_res = np.linalg.norm(_r) / max(np.linalg.norm(F_mod), 1.0)  # type: ignore[call-overload,operator]
         if _rel_res >= 1e-6:
             raise RuntimeError(
                 f"spsolve residual {_rel_res:.4e} exceeds tolerance 1e-6. "
@@ -3527,7 +3527,7 @@ class FESolver:
         # Defense in depth: a single non-finite value in the porosity field
         # (e.g. from upstream NaN propagation) silently corrupts elem_Vp via
         # np.mean; clip + isfinite check stops it from reaching Tsai-Wu.
-        if not np.all(np.isfinite(self.mesh.porosity)):
+        if not np.all(np.isfinite(self.mesh.porosity)):  # type: ignore[call-overload]
             raise ValueError(
                 "mesh.porosity contains non-finite values; refusing to evaluate "
                 "Tsai-Wu on a corrupted porosity field."

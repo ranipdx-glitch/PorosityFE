@@ -101,7 +101,7 @@ ignore = [
 # depends on untyped scientific libraries (numpy/scipy/matplotlib).
 # Goal here is to catch obvious signature regressions cheaply, not to
 # enforce full type coverage (tracked separately in issue #54 item 2).
-python_version = "3.9"
+python_version = "3.10"
 ignore_missing_imports = true
 implicit_optional = true        # treat `x: T = None` as Optional[T]
 strict_equality = true
