@@ -147,8 +147,8 @@ def main(argv=None) -> int:
     # Import after path setup
     try:
         from validation.validate_all import (
-            run_all_datasets,
             generate_master_report,
+            run_all_datasets,
             summarize_mae,
         )
     except ImportError as e:
@@ -163,7 +163,7 @@ def main(argv=None) -> int:
         return 2
 
     if not args.quiet:
-        print(f"Running porosity validation suite")
+        print("Running porosity validation suite")
         print(f"  Datasets: {datasets_dir}")
         print(f"  Output:   {args.output_dir}")
         print()

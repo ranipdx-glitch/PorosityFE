@@ -44,8 +44,8 @@ dependencies = [
 
 [project.optional-dependencies]
 web = ["streamlit>=1.32"]
-dev = ["pytest>=7.0.0"]
-all = ["streamlit>=1.32", "pytest>=7.0.0"]
+dev = ["pytest>=7.0.0", "ruff>=0.5", "mypy>=1.8"]
+all = ["streamlit>=1.32", "pytest>=7.0.0", "ruff>=0.5", "mypy>=1.8"]
 
 [project.urls]
 Homepage = "https://github.com/elhajjar1/PorosityFE"
@@ -62,6 +62,57 @@ packages = ["validation"]
 
 [tool.setuptools.package-data]
 validation = ["datasets/*.json", "schemas/*.json"]
+"*" = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+# Match the existing wide-format scientific code; nothing reflows.
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+# Pragmatic baseline: pyflakes (F), pycodestyle errors (E),
+# import sorting (I), pyupgrade (UP), and flake8-bugbear (B).
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    # UP006/UP035: rewriting `typing.Tuple/Dict/List` -> builtin generics
+    # across ~50 public signatures is a separate, behavior-touching slice
+    # (see issue #54 item 2) and the project supports Python 3.9 without
+    # `from __future__ import annotations`, so annotations are evaluated at
+    # runtime. Kept out of scope here; tightening signatures is tracked
+    # separately.
+    "UP006",
+    "UP035",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# app.py intentionally calls matplotlib.use("Agg") and bootstraps sys.path
+# before importing pyplot / sibling modules, which trips E402/I001.
+"app.py" = ["E402", "I001"]
+# Tests use explicit `== True/False` assertions for readability, a single
+# ply-angle loop label `l`, deliberately-unused locals, and in-function
+# imports interleaved with assertions; none warrant churning test logic.
+"tests/*" = ["E712", "E741", "F841", "I001"]
+
+[tool.mypy]
+# Non-strict baseline: the codebase is only partially annotated and
+# depends on untyped scientific libraries (numpy/scipy/matplotlib).
+# Goal here is to catch obvious signature regressions cheaply, not to
+# enforce full type coverage (tracked separately in issue #54 item 2).
+python_version = "3.10"
+ignore_missing_imports = true
+implicit_optional = true        # treat `x: T = None` as Optional[T]
+strict_equality = true
+warn_redundant_casts = true
+disallow_untyped_defs = false
+check_untyped_defs = false
+# These error categories are produced almost entirely by the existing
+# lazy-init pattern (attributes set to `None` in __init__ and populated
+# later, e.g. `self.nodes`), which mypy reads as `None`. Eliminating them
+# would require Optional-annotating + asserting throughout core solver
+# state -- a behavior-touching refactor explicitly out of scope for this
+# slice. They are disabled so the checker still flags genuine regressions
+# (call arity, return-type drift, undefined names) without false noise.
+disable_error_code = ["index", "attr-defined", "arg-type", "var-annotated"]

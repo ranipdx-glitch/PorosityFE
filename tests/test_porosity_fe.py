@@ -1545,7 +1545,6 @@ class TestBoundaryHandler:
                 assert abs(constrained[3 * nid + 1] - (gamma / 2.0) * x_n) < 1e-12
 
     def test_apply_penalty(self):
-        import scipy.sparse
         assembler = GlobalAssembler(self.mesh, self.material, self.pf)
         K = assembler.assemble_stiffness()
         constrained, F = self.handler.compression_bcs()
@@ -1554,7 +1553,6 @@ class TestBoundaryHandler:
         assert len(F_mod) == len(F)
 
     def test_penalty_increases_diagonal(self):
-        import scipy.sparse
         assembler = GlobalAssembler(self.mesh, self.material, self.pf)
         K = assembler.assemble_stiffness()
         constrained, F = self.handler.compression_bcs()
