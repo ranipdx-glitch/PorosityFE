@@ -17,6 +17,7 @@ import io
 import json
 import logging
 import sys
+import textwrap
 from pathlib import Path
 
 import matplotlib
@@ -352,12 +353,14 @@ def recommend_disposition(
 
 
 def build_ncr_record(result: dict, meta: dict) -> dict:
-    """Assemble a structured NCR from an analysis result and engineer-entered
-    metadata.
+    """Build an analysis validation summary to attach to an NCR.
 
-    ``meta`` carries the field-engineer inputs (NCR number, part number,
-    originator, etc.); everything technical is derived from ``result`` so the
-    nonconformance description and analysis cannot drift from what was run.
+    This is the technical attachment, not a full NCR form: it carries the
+    porosity analysis, the governing knockdown, and a recommended (not
+    final) disposition path. Part/serial/work-order identification lives on
+    the parent NCR — ``meta`` only needs who prepared it and an optional
+    parent-NCR reference. Everything technical is derived from ``result`` so
+    the summary cannot drift from what was actually run.
     """
     payload = build_export_payload(result)
     cfg = payload["config"]
@@ -373,20 +376,17 @@ def build_ncr_record(result: dict, meta: dict) -> dict:
     layup = meta.get("layup") or "(see analysis configuration)"
 
     return {
-        "ncr": {
-            "ncr_number": meta.get("ncr_number", ""),
-            "part_number": meta.get("part_number", ""),
-            "part_name": meta.get("part_name", ""),
-            "serial_number": meta.get("serial_number", ""),
-            "work_order": meta.get("work_order", ""),
-            "program": meta.get("program", ""),
-            "originator": meta.get("originator", ""),
+        "summary": {
+            "title": "Composite Porosity Analysis — NCR Validation Summary",
+            "prepared_by": meta.get("prepared_by", ""),
+            "ncr_reference": meta.get("ncr_reference", ""),
             "date": meta.get("date") or today,
             "structural_class": structural_class,
+            "note": meta.get("note", ""),
         },
         "nonconformance": {
             "summary": (
-                f"Porosity / void content of {Vp:.2f}% measured in a "
+                f"Porosity / void content of {Vp:.2f}% in a "
                 f"{cfg['material']} laminate ({cfg['n_plies']} plies, layup "
                 f"{layup}); {cfg['distribution']} distribution, "
                 f"{cfg['void_shape']} void morphology. Predicted to exceed "
@@ -401,8 +401,6 @@ def build_ncr_record(result: dict, meta: dict) -> dict:
             "distribution": cfg["distribution"],
             "void_shape": cfg["void_shape"],
             "analysis_mesh": cfg["mesh"],
-            "detection_method": meta.get("detection_method", ""),
-            "location_on_part": meta.get("location_on_part", ""),
         },
         "engineering_analysis": {
             "governing_mode": worst["mode"],
@@ -412,16 +410,6 @@ def build_ncr_record(result: dict, meta: dict) -> dict:
             "per_mode": payload["empirical"],
         },
         "recommended_disposition": disposition,
-        "approvals": {
-            "originating_engineer": {
-                "name": meta.get("originator", ""),
-                "signature": "",
-                "date": "",
-            },
-            "stress_engineering": {"name": "", "signature": "", "date": ""},
-            "quality_assurance": {"name": "", "signature": "", "date": ""},
-            "mrb_chair": {"name": "", "signature": "", "date": ""},
-        },
     }
 
 
@@ -439,36 +427,41 @@ def serialise_ncr_json(ncr: dict) -> str:
     return json.dumps(envelope, indent=2, default=_json_default)
 
 
+def _per_mode_rows(ea: dict) -> list:
+    """Flatten the per-mode/model knockdown table to (mode, model, MPa, kd)."""
+    rows = []
+    for mode in ea["per_mode"]:
+        for model in ea["per_mode"][mode]:
+            r = ea["per_mode"][mode][model]
+            rows.append((
+                mode, model,
+                f"{r['failure_stress_MPa']:.1f}",
+                f"{r['knockdown']:.3f}",
+            ))
+    return rows
+
+
 def serialise_ncr_markdown(ncr: dict) -> str:
-    """Render the NCR as a printable form a field engineer can attach."""
-    n = ncr["ncr"]
+    """Render the analysis validation summary as a Markdown attachment."""
+    s = ncr["summary"]
     nc = ncr["nonconformance"]
     ea = ncr["engineering_analysis"]
     dp = ncr["recommended_disposition"]
-    ap = ncr["approvals"]
 
     lines = []
-    lines.append("# NONCONFORMANCE REPORT (NCR)")
+    lines.append(f"# {s['title']}")
     lines.append("")
-    lines.append("_Composite porosity nonconformance — MRB disposition support_")
+    lines.append("_Attachment to a Nonconformance Report — analysis validation_")
     lines.append("")
-
-    lines.append("## 1. Identification")
-    lines.append("")
-    lines.append("| Field | Value |")
-    lines.append("|---|---|")
-    lines.append(f"| NCR number | {n['ncr_number'] or '—'} |")
-    lines.append(f"| Part number | {n['part_number'] or '—'} |")
-    lines.append(f"| Part name | {n['part_name'] or '—'} |")
-    lines.append(f"| Serial number | {n['serial_number'] or '—'} |")
-    lines.append(f"| Work order | {n['work_order'] or '—'} |")
-    lines.append(f"| Program | {n['program'] or '—'} |")
-    lines.append(f"| Originating engineer | {n['originator'] or '—'} |")
-    lines.append(f"| Date | {n['date']} |")
-    lines.append(f"| Structural classification | {n['structural_class']} |")
+    lines.append(f"- Prepared by: {s['prepared_by'] or '—'}")
+    lines.append(f"- Parent NCR reference: {s['ncr_reference'] or '—'}")
+    lines.append(f"- Date: {s['date']}")
+    lines.append(f"- Structural classification: {s['structural_class']}")
+    if s.get("note"):
+        lines.append(f"- Engineer note: {s['note']}")
     lines.append("")
 
-    lines.append("## 2. Nonconformance Description")
+    lines.append("## 1. Nonconformance Summary")
     lines.append("")
     lines.append(nc["summary"])
     lines.append("")
@@ -482,11 +475,9 @@ def serialise_ncr_markdown(ncr: dict) -> str:
     lines.append(f"| Distribution | {nc['distribution']} |")
     lines.append(f"| Void morphology | {nc['void_shape']} |")
     lines.append(f"| Analysis mesh | {nc['analysis_mesh']} |")
-    lines.append(f"| Detection / NDI method | {nc['detection_method'] or '—'} |")
-    lines.append(f"| Location on part | {nc['location_on_part'] or '—'} |")
     lines.append("")
 
-    lines.append("## 3. Engineering Analysis (predicted porosity knockdown)")
+    lines.append("## 2. Engineering Analysis (predicted porosity knockdown)")
     lines.append("")
     lines.append(
         f"**Governing (worst-case) case:** {ea['governing_mode']} / "
@@ -499,17 +490,12 @@ def serialise_ncr_markdown(ncr: dict) -> str:
     lines.append("")
     lines.append("| Mode | Model | Residual strength (MPa) | Knockdown |")
     lines.append("|---|---|---|---|")
-    for mode in ea["per_mode"]:
-        for model in ea["per_mode"][mode]:
-            r = ea["per_mode"][mode][model]
-            lines.append(
-                f"| {mode} | {model} | "
-                f"{r['failure_stress_MPa']:.1f} | {r['knockdown']:.3f} |"
-            )
+    for mode, model, mpa, kd in _per_mode_rows(ea):
+        lines.append(f"| {mode} | {model} | {mpa} | {kd} |")
     lines.append("")
 
     lines.append(
-        "## 4. Recommended Disposition Path "
+        "## 3. Recommended Disposition Path "
         "(for MRB review — NOT a final disposition)"
     )
     lines.append("")
@@ -520,43 +506,139 @@ def serialise_ncr_markdown(ncr: dict) -> str:
     lines.append(f"> {dp['disclaimer']}")
     lines.append("")
 
-    lines.append("## 5. Cited Criteria")
+    lines.append("## 4. Cited Criteria")
     lines.append("")
     for c in dp["cited_criteria"]:
         lines.append(f"- {c}")
     lines.append("")
 
-    lines.append("## 6. Required MRB Actions")
+    lines.append("## 5. Required MRB Actions")
     lines.append("")
     for a in dp["required_mrb_actions"]:
         lines.append(f"- [ ] {a}")
     lines.append("")
-
-    lines.append("## 7. Approvals / Sign-off")
-    lines.append("")
-    lines.append("| Role | Name | Signature | Date |")
-    lines.append("|---|---|---|---|")
-    role_labels = [
-        ("originating_engineer", "Originating engineer"),
-        ("stress_engineering", "Stress / structures engineering"),
-        ("quality_assurance", "Quality assurance"),
-        ("mrb_chair", "MRB chair"),
-    ]
-    for key, label in role_labels:
-        a = ap[key]
-        lines.append(
-            f"| {label} | {a['name'] or '—'} | "
-            f"{a['signature'] or '__________'} | "
-            f"{a['date'] or '__________'} |"
-        )
-    lines.append("")
     lines.append(
-        "_Generated by PorosityFE MRB support tool. This document records a "
-        "predictive analysis and a recommended disposition path; it does not "
-        "constitute MRB approval._"
+        "_Generated by PorosityFE MRB support tool. This is a predictive "
+        "analysis and a recommended disposition path; it does not constitute "
+        "MRB approval._"
     )
     lines.append("")
     return "\n".join(lines)
+
+
+_PDF_WRAP = 92
+_PDF_LINES_PER_PAGE = 58
+
+
+def _ncr_text_lines(ncr: dict) -> list:
+    """Plain-text (no Markdown) lines for the PDF, wrapped to a fixed width."""
+    s = ncr["summary"]
+    nc = ncr["nonconformance"]
+    ea = ncr["engineering_analysis"]
+    dp = ncr["recommended_disposition"]
+
+    out: list = []
+
+    def para(text: str, indent: str = "") -> None:
+        for w in textwrap.wrap(text, _PDF_WRAP - len(indent)) or [""]:
+            out.append(indent + w)
+
+    def rule() -> None:
+        out.append("-" * _PDF_WRAP)
+
+    out.append(s["title"].upper())
+    out.append("Attachment to a Nonconformance Report - analysis validation")
+    rule()
+    out.append(f"Prepared by:               {s['prepared_by'] or '-'}")
+    out.append(f"Parent NCR reference:      {s['ncr_reference'] or '-'}")
+    out.append(f"Date:                      {s['date']}")
+    out.append(f"Structural classification: {s['structural_class']}")
+    if s.get("note"):
+        para(f"Engineer note: {s['note']}")
+    out.append("")
+
+    out.append("1. NONCONFORMANCE SUMMARY")
+    rule()
+    para(nc["summary"])
+    out.append("")
+    out.append(f"  Material:                {nc['material']}")
+    out.append(f"  Layup:                   {nc['layup']}")
+    out.append(f"  Plies:                   {nc['n_plies']}")
+    out.append(f"  Ply thickness (mm):      {nc['t_ply_mm']}")
+    out.append(f"  Measured void Vp (%):    {nc['measured_Vp_percent']:.2f}")
+    out.append(f"  Distribution:            {nc['distribution']}")
+    out.append(f"  Void morphology:         {nc['void_shape']}")
+    out.append(f"  Analysis mesh:           {nc['analysis_mesh']}")
+    out.append("")
+
+    out.append("2. ENGINEERING ANALYSIS (predicted porosity knockdown)")
+    rule()
+    para(
+        f"Governing (worst-case) case: {ea['governing_mode']} / "
+        f"{ea['governing_model']} - knockdown {ea['governing_knockdown']:.3f} "
+        f"({ea['governing_knockdown'] * 100:.1f}% of pristine retained), "
+        f"residual strength {ea['governing_residual_strength_MPa']:.1f} MPa."
+    )
+    out.append("")
+    out.append(
+        f"  {'Mode':<14}{'Model':<14}{'Resid. (MPa)':>14}{'Knockdown':>12}"
+    )
+    out.append("  " + "-" * 52)
+    for mode, model, mpa, kd in _per_mode_rows(ea):
+        out.append(f"  {mode:<14}{model:<14}{mpa:>14}{kd:>12}")
+    out.append("")
+
+    out.append("3. RECOMMENDED DISPOSITION PATH")
+    out.append("   (for MRB review - NOT a final disposition)")
+    rule()
+    para(f"Recommended path: {dp['path']}")
+    out.append("")
+    para(f"Rationale: {dp['rationale']}")
+    out.append("")
+    para(dp["disclaimer"], indent="  ")
+    out.append("")
+
+    out.append("4. CITED CRITERIA")
+    rule()
+    for c in dp["cited_criteria"]:
+        para(f"- {c}", indent="  ")
+    out.append("")
+
+    out.append("5. REQUIRED MRB ACTIONS")
+    rule()
+    for a in dp["required_mrb_actions"]:
+        para(f"[ ] {a}", indent="  ")
+    out.append("")
+    para(
+        "Generated by PorosityFE MRB support tool. This is a predictive "
+        "analysis and a recommended disposition path; it does not constitute "
+        "MRB approval."
+    )
+    return out
+
+
+def serialise_ncr_pdf(ncr: dict) -> bytes:
+    """Render the validation summary as a paginated US-Letter PDF."""
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    lines = _ncr_text_lines(ncr)
+    pages = [
+        lines[i:i + _PDF_LINES_PER_PAGE]
+        for i in range(0, len(lines), _PDF_LINES_PER_PAGE)
+    ] or [[""]]
+
+    buf = io.BytesIO()
+    with PdfPages(buf) as pdf:
+        for page in pages:
+            fig = plt.figure(figsize=(8.5, 11))
+            fig.text(
+                0.07, 0.96, "\n".join(page),
+                family="monospace", fontsize=8.5,
+                va="top", ha="left",
+            )
+            pdf.savefig(fig)
+            plt.close(fig)
+    return buf.getvalue()
 
 
 def write_ncr_json(filepath: str, ncr: dict) -> None:
@@ -567,6 +649,11 @@ def write_ncr_json(filepath: str, ncr: dict) -> None:
 def write_ncr_markdown(filepath: str, ncr: dict) -> None:
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(serialise_ncr_markdown(ncr))
+
+
+def write_ncr_pdf(filepath: str, ncr: dict) -> None:
+    with open(filepath, "wb") as f:
+        f.write(serialise_ncr_pdf(ncr))
 
 
 # ======================================================================
@@ -1074,8 +1161,8 @@ def _render():
             - **Results** — empirical knockdown bar chart with the FE stiffness knockdown overlaid
             - **Stress** — FE stress contour for a chosen component (skipped for ILSS)
             - **Export** — download the empirical knockdown sweep as JSON or
-              CSV, or generate a Nonconformance Report (NCR) with a
-              recommended MRB disposition path
+              CSV, or generate an NCR validation summary (PDF / Markdown /
+              JSON) with a recommended MRB disposition path
             """
         )
         if result is None:
@@ -1150,35 +1237,27 @@ def _render():
                 st.code(_serialise_payload_json(payload), language="json")
 
             st.divider()
-            st.subheader("Create Nonconformance Report (NCR)")
+            st.subheader("NCR validation summary")
             st.caption(
-                "Turn this analysis into a structured NCR for the MRB. The "
-                "tool produces analysis and a **recommended** disposition "
-                "path — it does not issue a final disposition."
+                "Generate a concise analysis summary to **attach to an NCR**. "
+                "It carries the porosity validation and a *recommended* "
+                "disposition path for the MRB — it is not a full NCR form and "
+                "does not issue a final disposition. Part/serial/work-order "
+                "identification stays on the parent NCR."
             )
 
             with st.form("ncr_form"):
                 c1, c2 = st.columns(2)
                 with c1:
-                    ncr_number = st.text_input("NCR number", value="")
-                    part_number = st.text_input("Part number", value="")
-                    part_name = st.text_input("Part name", value="")
-                    serial_number = st.text_input("Serial number", value="")
-                    work_order = st.text_input("Work order", value="")
+                    prepared_by = st.text_input(
+                        "Prepared by", value="",
+                        help="Engineer preparing this analysis summary.",
+                    )
+                    ncr_reference = st.text_input(
+                        "Parent NCR reference (optional)", value="",
+                        help="Cross-reference to the NCR this attaches to.",
+                    )
                 with c2:
-                    program = st.text_input("Program", value="")
-                    originator = st.text_input(
-                        "Originating engineer", value="",
-                        help="Engineer in the field raising this NCR.",
-                    )
-                    location_on_part = st.text_input(
-                        "Location on part", value="",
-                        help="Where on the part the porosity was found.",
-                    )
-                    detection_method = st.text_input(
-                        "Detection / NDI method", value="",
-                        help="e.g. ultrasonic C-scan, micrograph, acid digestion.",
-                    )
                     structural_class = st.selectbox(
                         "Structural classification",
                         options=list(STRUCTURAL_CLASSES),
@@ -1189,27 +1268,22 @@ def _render():
                             "for any Use-As-Is."
                         ),
                     )
-                ncr_date = st.date_input(
-                    "Date", value=datetime.date.today()
+                note = st.text_area(
+                    "Engineer note (optional)", value="",
+                    help="Any observation context to record on the summary.",
                 )
                 make_ncr = st.form_submit_button(
-                    "Generate NCR", type="primary",
+                    "Generate summary", type="primary",
                     use_container_width=True,
                 )
 
             if make_ncr:
                 meta = {
-                    "ncr_number": ncr_number,
-                    "part_number": part_number,
-                    "part_name": part_name,
-                    "serial_number": serial_number,
-                    "work_order": work_order,
-                    "program": program,
-                    "originator": originator,
-                    "location_on_part": location_on_part,
-                    "detection_method": detection_method,
+                    "prepared_by": prepared_by,
+                    "ncr_reference": ncr_reference,
                     "structural_class": structural_class,
-                    "date": ncr_date.isoformat(),
+                    "note": note,
+                    "date": datetime.date.today().isoformat(),
                     "layup": layup_for_title,
                 }
                 ncr = build_ncr_record(result, meta)
@@ -1221,25 +1295,36 @@ def _render():
                 st.info(dp["disclaimer"])
 
                 ncr_md = serialise_ncr_markdown(ncr)
-                stem = ncr_number.strip().replace(" ", "_") or "porosity_ncr"
-                dl1, dl2 = st.columns(2)
+                stem = (
+                    ncr_reference.strip().replace(" ", "_")
+                    or "porosity_analysis_summary"
+                )
+                dl1, dl2, dl3 = st.columns(3)
                 with dl1:
                     st.download_button(
-                        "Download NCR (Markdown)",
+                        "Download PDF",
+                        data=serialise_ncr_pdf(ncr),
+                        file_name=f"{stem}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                with dl2:
+                    st.download_button(
+                        "Download Markdown",
                         data=ncr_md,
                         file_name=f"{stem}.md",
                         mime="text/markdown",
                         use_container_width=True,
                     )
-                with dl2:
+                with dl3:
                     st.download_button(
-                        "Download NCR (JSON)",
+                        "Download JSON",
                         data=serialise_ncr_json(ncr),
                         file_name=f"{stem}.json",
                         mime="application/json",
                         use_container_width=True,
                     )
-                with st.expander("Preview NCR"):
+                with st.expander("Preview summary"):
                     st.markdown(ncr_md)
 
 

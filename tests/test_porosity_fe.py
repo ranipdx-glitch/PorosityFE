@@ -2250,7 +2250,7 @@ class TestExportHelpers:
 
 
 class TestNCRExport:
-    """NCR creation tool for MRB disposition support (field-engineer flow)."""
+    """NCR validation-summary attachment for MRB disposition support."""
 
     @staticmethod
     def _result(comp_kd=0.823, ilss_kd=0.744, Vp=3.0):
@@ -2278,16 +2278,10 @@ class TestNCRExport:
     @staticmethod
     def _meta(**overrides):
         meta = {
-            "ncr_number": "NCR-2026-0042",
-            "part_number": "PN-12345",
-            "part_name": "Aft spar",
-            "serial_number": "SN-001",
-            "work_order": "WO-9",
-            "program": "X-Wing",
-            "originator": "J. Engineer",
-            "location_on_part": "Web, BL 120",
-            "detection_method": "Ultrasonic C-scan",
+            "prepared_by": "J. Engineer",
+            "ncr_reference": "NCR-2026-0042",
             "structural_class": "primary",
+            "note": "Voids found in C-scan of web region.",
             "date": "2026-05-17",
             "layup": "[0/45/-45/90]_3s",
         }
@@ -2320,15 +2314,16 @@ class TestNCRExport:
     def test_build_ncr_record_shape(self):
         from app import build_ncr_record
         ncr = build_ncr_record(self._result(), self._meta())
-        assert ncr["ncr"]["ncr_number"] == "NCR-2026-0042"
-        assert ncr["ncr"]["originator"] == "J. Engineer"
+        # Lightweight summary metadata — no part/serial/work-order fields.
+        assert ncr["summary"]["prepared_by"] == "J. Engineer"
+        assert ncr["summary"]["ncr_reference"] == "NCR-2026-0042"
+        assert "approvals" not in ncr
+        assert "part_number" not in ncr["summary"]
         assert ncr["nonconformance"]["measured_Vp_percent"] == 3.0
         assert ncr["nonconformance"]["layup"] == "[0/45/-45/90]_3s"
         # Governing analysis derives from the worst (ILSS) case.
         assert ncr["engineering_analysis"]["governing_mode"] == "ilss"
         assert ncr["recommended_disposition"]["path"]
-        # Approval block ships unsigned for the MRB to complete.
-        assert ncr["approvals"]["mrb_chair"]["signature"] == ""
 
     def test_serialise_ncr_json_envelope_and_round_trip(self, tmp_path):
         from app import build_ncr_record, write_ncr_json
@@ -2338,7 +2333,7 @@ class TestNCRExport:
         data = load_results_from_json(path)
         assert data["format"] == FORMAT_NCR
         assert "provenance" in data
-        assert data["ncr"]["part_number"] == "PN-12345"
+        assert data["summary"]["prepared_by"] == "J. Engineer"
 
     def test_serialise_ncr_markdown_has_sections(self, tmp_path):
         from app import build_ncr_record, write_ncr_markdown
@@ -2346,11 +2341,22 @@ class TestNCRExport:
         write_ncr_markdown(path, build_ncr_record(self._result(), self._meta()))
         with open(path, encoding="utf-8") as f:
             md = f.read()
-        assert "# NONCONFORMANCE REPORT (NCR)" in md
+        assert "NCR Validation Summary" in md
         assert "Recommended Disposition Path" in md
         assert "NOT a final disposition" in md
         assert "NCR-2026-0042" in md
-        assert "Approvals / Sign-off" in md
+        assert "Engineering Analysis" in md
+
+    def test_serialise_ncr_pdf_is_valid_pdf(self, tmp_path):
+        from app import build_ncr_record, serialise_ncr_pdf, write_ncr_pdf
+        ncr = build_ncr_record(self._result(), self._meta())
+        blob = serialise_ncr_pdf(ncr)
+        assert isinstance(blob, bytes)
+        assert blob.startswith(b"%PDF")
+        path = str(tmp_path / "ncr.pdf")
+        write_ncr_pdf(path, ncr)
+        with open(path, "rb") as f:
+            assert f.read(4) == b"%PDF"
 
 
 class TestKeCacheKeyGeometry:
