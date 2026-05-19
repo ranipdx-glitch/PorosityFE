@@ -787,7 +787,7 @@ def plot_mesh(result: dict):
     Z = mesh.nodes[indices, 2].reshape(mesh.nz + 1, mesh.nx + 1)
     Sr = mesh.stiffness_reduction[indices].reshape(mesh.nz + 1, mesh.nx + 1)
 
-    im = ax.contourf(X, Z, Sr * 100, levels=20, cmap="viridis",
+    im = ax.contourf(X, Z, Sr * 100, levels=20, cmap="cividis",
                      vmin=max(0, Sr.min() * 100 - 1), vmax=100)
     fig.colorbar(im, ax=ax, label="Stiffness Retention (%)")
 
