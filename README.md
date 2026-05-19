@@ -144,6 +144,31 @@ Notes:
   a non-standard material system, see
   [Calibrating `alpha` / `n` for a custom material](#calibrating-alpha--n-for-a-custom-material).
 
+## Examples
+
+Runnable scripts under [`examples/`](examples/) cover the most common
+configurations end-to-end. Each script is standalone (~30–50 lines), prints
+a short result table, and saves a single PNG to `examples/output/` (which
+is gitignored). Run any of them from the repo root:
+
+```bash
+python examples/uniform_spherical.py
+```
+
+| Script | What it demonstrates |
+|---|---|
+| [`examples/uniform_spherical.py`](examples/uniform_spherical.py) | Uniform porosity, spherical voids; empirical compression knockdown (Judd-Wright). |
+| [`examples/clustered_midplane.py`](examples/clustered_midplane.py) | Gaussian-clustered porosity at the midplane; ILSS knockdown. |
+| [`examples/interface_penny.py`](examples/interface_penny.py) | Interface-concentrated porosity with penny-shaped voids — the worst-case ILSS morphology. |
+| [`examples/discrete_voids.py`](examples/discrete_voids.py) | Explicit `VoidGeometry` ellipsoids on top of a low-uniform background; renders the SCF field around one void. |
+| [`examples/compute_degraded_clt_moduli.py`](examples/compute_degraded_clt_moduli.py) | CLT path: laminate effective moduli `(Ex, Ey, Gxy)` vs. `Vp` for a quasi-isotropic layup. |
+
+See [`examples/README.md`](examples/README.md) for the full index and the
+conventions reminder. Math conventions (Voigt order, engineering vs. tensor
+strain, compression-sign) are documented at the API surface — look for the
+**Notes** block on `MaterialProperties.get_stiffness_matrix`,
+`Hex8Element.B_matrix`, `FieldResults`, and `EmpiricalSolver.apply_loading`.
+
 ### Build validate_porosity CLI executable (Linux / macOS / Windows)
 ```bash
 pip install pyinstaller

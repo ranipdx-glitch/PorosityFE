@@ -1,0 +1,8 @@
+# Ship the runnable example scripts in the sdist so users who install
+# from PyPI (or unpack a release tarball) get the same gallery as the
+# git checkout. `examples/` is intentionally NOT a Python package (no
+# __init__.py), so [tool.setuptools.package-data] in pyproject.toml does
+# not cover it — MANIFEST.in is the right tool for top-level scripts.
+include examples/*.py
+include examples/README.md
+include examples/.gitignore
