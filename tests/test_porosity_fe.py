@@ -3691,3 +3691,219 @@ class TestPropagateUncertainty:
         with pytest.raises(ValueError, match="non-perturbable"):
             propagate_uncertainty(0.02, 'T800_epoxy',
                                   covs={'not_a_field': 0.1}, n_samples=4)
+
+
+class TestFailureCriteria:
+    """#62: Hashin / max-stress / Tsai-Wu dispatch on FESolver.
+
+    The Hashin and max-stress polynomials are exercised directly on a
+    synthetic stress state (no FE solve needed) so the per-mode arithmetic
+    can be asserted in isolation. The Tsai-Wu golden test still runs through
+    a real FE solve to confirm bit-identical legacy behavior.
+    """
+
+    def setup_method(self):
+        self.material = MATERIALS['T800_epoxy']
+        self.pf = PorosityField(self.material, 0.0, distribution='uniform')
+        self.mesh = CompositeMesh(self.pf, self.material, nx=2, ny=2, nz=2)
+        self.solver = FESolver(self.mesh, self.material, self.pf)
+
+    def test_hashin_separates_modes(self):
+        """Pure fiber-tension stress lights up `fiber_t`, not the matrix modes."""
+        mat = self.material
+        # Single element, single Gauss point, pure σ_11 = 0.5 * X_T.
+        sigma_11 = 0.5 * mat.sigma_1t
+        s = np.array([[sigma_11, 0.0, 0.0, 0.0, 0.0, 0.0]])
+        # Pristine strengths (no porosity).
+        strengths = self.solver._degraded_strengths(0.0)
+        modes = self.solver._evaluate_hashin(s, strengths)
+        assert modes['fiber_t'][0] == pytest.approx(0.25, rel=1e-12)
+        # Other modes should be exactly zero.
+        assert modes['fiber_c'][0] == 0.0
+        assert modes['matrix_t'][0] == 0.0
+        assert modes['matrix_c'][0] == 0.0
+        # Aggregate max must equal the fiber-tension term.
+        assert modes['max_fi'][0] == pytest.approx(0.25, rel=1e-12)
+
+    def test_hashin_pure_fiber_compression(self):
+        """σ_11 < 0 must light up `fiber_c`, not `fiber_t`."""
+        mat = self.material
+        s = np.array([[-0.5 * mat.sigma_1c, 0.0, 0.0, 0.0, 0.0, 0.0]])
+        strengths = self.solver._degraded_strengths(0.0)
+        modes = self.solver._evaluate_hashin(s, strengths)
+        assert modes['fiber_c'][0] == pytest.approx(0.25, rel=1e-12)
+        assert modes['fiber_t'][0] == 0.0
+
+    def test_max_stress_matches_simple_uniaxial(self):
+        """σ_11 = 0.5·X_T must produce FI = 0.5 for the max-stress criterion."""
+        mat = self.material
+        s = np.array([[0.5 * mat.sigma_1t, 0.0, 0.0, 0.0, 0.0, 0.0]])
+        strengths = self.solver._degraded_strengths(0.0)
+        modes = self.solver._evaluate_max_stress(s, strengths)
+        assert modes['fiber_t'][0] == pytest.approx(0.5, rel=1e-12)
+        assert modes['max_fi'][0] == pytest.approx(0.5, rel=1e-12)
+        # Other components are exactly zero.
+        assert modes['fiber_c'][0] == 0.0
+        assert modes['matrix_t'][0] == 0.0
+        assert modes['shear'][0] == 0.0
+
+    def test_tsai_wu_unchanged_when_default(self):
+        """Default solve() must still use Tsai-Wu with identical numbers."""
+        # Reference: untouched legacy call (no explicit criterion).
+        ref_solver = FESolver(self.mesh, self.material, self.pf)
+        ref = ref_solver.solve(loading='compression', applied_strain=-0.001)
+
+        # New explicit-default path should match bit-for-bit.
+        new_solver = FESolver(self.mesh, self.material, self.pf,
+                              failure_criterion='tsai_wu')
+        out = new_solver.solve(loading='compression', applied_strain=-0.001)
+        assert out.failure_criterion == 'tsai_wu'
+        assert ref.max_failure_index == out.max_failure_index
+        np.testing.assert_allclose(
+            ref.per_element_failure_index, out.per_element_failure_index,
+            rtol=0, atol=0)
+
+    def test_solver_accepts_hashin_criterion(self):
+        """FESolver.solve must dispatch to Hashin and populate mode_indices."""
+        solver = FESolver(self.mesh, self.material, self.pf,
+                          failure_criterion='hashin')
+        res = solver.solve(loading='tension', applied_strain=0.001)
+        assert res.failure_criterion == 'hashin'
+        assert res.failure_mode_indices is not None
+        # All five mode keys must be present.
+        for key in ('fiber_t', 'fiber_c', 'matrix_t', 'matrix_c', 'shear',
+                    'max_fi'):
+            assert key in res.failure_mode_indices
+        # Tension loading: fiber_t should dominate over compression modes.
+        assert res.failure_mode_indices['fiber_t'] >= \
+            res.failure_mode_indices['fiber_c']
+
+    def test_solver_accepts_max_stress_criterion(self):
+        solver = FESolver(self.mesh, self.material, self.pf)
+        res = solver.solve(loading='tension', applied_strain=0.001,
+                           failure_criterion='max_stress')
+        assert res.failure_criterion == 'max_stress'
+        assert res.failure_mode_indices is not None
+        # Max-stress fills zeros, not NaNs.
+        for v in res.failure_mode_indices.values():
+            assert np.isfinite(v)
+
+    def test_solver_rejects_unknown_criterion(self):
+        with pytest.raises(ValueError, match="Unknown failure_criterion"):
+            FESolver(self.mesh, self.material, self.pf,
+                     failure_criterion='nonsense')
+        solver = FESolver(self.mesh, self.material, self.pf)
+        with pytest.raises(ValueError, match="Unknown failure_criterion"):
+            solver.solve(loading='compression', applied_strain=-0.001,
+                         failure_criterion='nonsense')
+
+    def test_tsai_wu_mode_indices_are_nan(self):
+        """Tsai-Wu doesn't separate modes; per-mode entries must be NaN."""
+        solver = FESolver(self.mesh, self.material, self.pf,
+                          failure_criterion='tsai_wu')
+        res = solver.solve(loading='compression', applied_strain=-0.001)
+        assert res.failure_mode_indices is not None
+        # The max_fi entry is the scalar; the per-mode entries are NaN.
+        assert np.isnan(res.failure_mode_indices['fiber_t'])
+        assert np.isnan(res.failure_mode_indices['matrix_c'])
+
+
+class TestEmpiricalSolverPlugin:
+    """#62: EmpiricalSolver must accept a user-supplied knockdown callable."""
+
+    def setup_method(self):
+        self.material = MATERIALS['T800_epoxy']
+        self.pf = PorosityField(self.material, 0.03, distribution='uniform')
+        self.mesh = CompositeMesh(self.pf, self.material, nx=4, ny=2, nz=2)
+        self.solver = EmpiricalSolver(self.mesh, self.material)
+
+    def test_callable_overrides_builtin(self):
+        """A constant callable must drive the reported failure stress."""
+        const_kd = 0.42
+
+        def my_model(Vp, mode):  # noqa: D401  (test helper)
+            return const_kd
+
+        result = self.solver.get_failure_load(mode='compression', model=my_model)
+        sigma_0 = self.material.sigma_1c
+        assert result['knockdown'] == pytest.approx(const_kd, rel=1e-12)
+        assert result['failure_stress'] == pytest.approx(
+            const_kd * sigma_0, rel=1e-12)
+        # Label is taken from __name__ when a callable is passed.
+        assert result['model'] == 'my_model'
+
+    def test_callable_rejects_out_of_range(self):
+        """KD > 1 must surface as a ValueError at dispatch time."""
+        with pytest.raises(ValueError, match=r"in \[0, 1\]"):
+            self.solver.apply_loading(
+                mode='compression',
+                model=lambda Vp, mode: 1.5,
+            )
+
+    def test_callable_rejects_negative(self):
+        with pytest.raises(ValueError, match=r"in \[0, 1\]"):
+            self.solver.apply_loading(
+                mode='compression',
+                model=lambda Vp, mode: -0.1,
+            )
+
+    def test_callable_rejects_non_finite(self):
+        with pytest.raises(ValueError, match="non-finite"):
+            self.solver.apply_loading(
+                mode='compression',
+                model=lambda Vp, mode: float('nan'),
+            )
+
+    def test_non_callable_non_string_rejected(self):
+        with pytest.raises((TypeError, ValueError)):
+            self.solver.apply_loading(mode='compression', model=42)
+
+    def test_callable_bypasses_layup_scale(self):
+        """User callable receives raw Vp, with no layup-coefficient mediation."""
+        # Build two solvers with markedly different layups; the user callable
+        # should produce the same knockdown because the layup scale is bypassed.
+        ud_solver = EmpiricalSolver(
+            self.mesh, self.material, ply_angles=[0.0, 0.0, 0.0, 0.0])
+        qi_solver = EmpiricalSolver(
+            self.mesh, self.material, ply_angles=[0.0, 90.0, 45.0, -45.0])
+
+        def my_model(Vp, mode):
+            return 0.77
+
+        ud_res = ud_solver.get_failure_load(model=my_model)
+        qi_res = qi_solver.get_failure_load(model=my_model)
+        assert ud_res['knockdown'] == pytest.approx(0.77, rel=1e-12)
+        assert qi_res['knockdown'] == pytest.approx(0.77, rel=1e-12)
+
+    def test_callable_still_uses_discrete_void_scf(self):
+        """User callable is composed with the discrete-void SCF post-step."""
+        # With a discrete macrovoid in the mesh, the SCF post-step should
+        # depress the user-defined constant knockdown near the void.
+        void = VoidGeometry(
+            center=(25.0, 10.0, self.material.total_thickness / 2),
+            radii=(2.0, 2.0, 0.5))
+        pf_void = PorosityField(
+            self.material, 0.02, distribution='uniform',
+            discrete_voids=[void])
+        mesh_void = CompositeMesh(pf_void, self.material, nx=20, ny=10, nz=12)
+        solver = EmpiricalSolver(mesh_void, self.material)
+        solver.apply_loading(
+            mode='compression', model=lambda Vp, mode: 0.9)
+        # Some nodes (those near the discrete void) should be strictly
+        # below 0.9 thanks to the SCF post-step.
+        kd = solver.nodal_knockdown
+        assert kd is not None
+        assert np.any(kd < 0.9 - 1e-9), \
+            "discrete-void SCF post-step did not depress any nodal knockdown"
+        assert np.all(kd <= 0.9 + 1e-9)
+
+    def test_get_all_failure_loads_accepts_extra_models(self):
+        """get_all_failure_loads must compose built-ins with extra callables."""
+        results = self.solver.get_all_failure_loads(
+            extra_models={'flat': lambda Vp, mode: 0.5})
+        for mode in ('compression', 'tension', 'shear', 'ilss',
+                     'transverse_tension'):
+            assert 'judd_wright' in results[mode]
+            assert 'flat' in results[mode]
+            assert results[mode]['flat']['knockdown'] == pytest.approx(
+                0.5, rel=1e-12)

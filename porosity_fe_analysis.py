@@ -32,7 +32,7 @@ import subprocess
 import sys
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -1278,6 +1278,55 @@ class EmpiricalSolver:
             raise ValueError(f"Internal Vp is non-finite: {Vp!r}")
         return float(np.clip(Vp, 0.0, 1.0))
 
+    @staticmethod
+    def _validate_user_kd_callable(model_func: Callable[[float, str], float],
+                                   mode: str,
+                                   max_Vp: float = 1.0,
+                                   n_grid: int = 11) -> None:
+        """Validate that a user-supplied knockdown callable is well-behaved.
+
+        The callable contract is ``model(Vp: float, mode: str) -> float in
+        [0, 1]``. We sample ``Vp`` on a uniform grid over ``[0, max_Vp]`` and
+        check that the return is finite and in the closed unit interval.
+        Reuses :meth:`_check_internal_Vp` so the same overshoot/finite policy
+        applies as the built-in models.
+
+        Raises
+        ------
+        TypeError
+            If ``model_func`` is not callable.
+        ValueError
+            If the callable returns a non-finite value, or a value outside
+            ``[0, 1]``, on any grid point.
+        """
+        if not callable(model_func):
+            raise TypeError(
+                f"User knockdown model must be callable; got "
+                f"{type(model_func).__name__}."
+            )
+        grid = np.linspace(0.0, float(max_Vp), int(n_grid))
+        for Vp in grid:
+            Vp = EmpiricalSolver._check_internal_Vp(float(Vp))
+            try:
+                kd = model_func(Vp, mode)
+            except Exception as exc:
+                raise ValueError(
+                    f"User knockdown model raised {type(exc).__name__} at "
+                    f"Vp={Vp:.3f}, mode={mode!r}: {exc}"
+                ) from exc
+            kd_f = float(kd)
+            if not np.isfinite(kd_f):
+                raise ValueError(
+                    f"User knockdown model returned non-finite value "
+                    f"{kd_f!r} at Vp={Vp:.3f}, mode={mode!r}; "
+                    f"expected a finite float in [0, 1]."
+                )
+            if kd_f < 0.0 or kd_f > 1.0:
+                raise ValueError(
+                    f"User knockdown model returned {kd_f!r} at Vp={Vp:.3f}, "
+                    f"mode={mode!r}; expected a value in [0, 1]."
+                )
+
     def _judd_wright(self, Vp: float, mode: str) -> float:
         """Judd-Wright knockdown: KD = exp(-alpha * Vp).
 
@@ -1327,7 +1376,36 @@ class EmpiricalSolver:
             kd *= (1.0 - influence * (1.0 - 1.0 / scf))
         return kd
 
-    def apply_loading(self, mode: str = 'compression', model: str = 'judd_wright'):
+    def _resolve_knockdown_model(
+            self, model: Union[str, Callable[[float, str], float]], mode: str
+    ) -> Tuple[Callable[[float, str], float], bool]:
+        """Resolve ``model`` to a ``(callable, is_user_supplied)`` pair.
+
+        Built-in string names dispatch to the corresponding ``_judd_wright``
+        / ``_power_law`` / ``_linear`` bound method (and therefore go through
+        the existing layup-scaled coefficient table). A user-supplied
+        callable is validated on a ``Vp ∈ [0, 1]`` grid (so the contract
+        ``model(Vp, mode) -> float in [0, 1]`` is enforced once at dispatch
+        time, not silently propagated to downstream nodal arrays) and
+        returned as-is — the caller owns the coefficients, so the layup
+        scaling is bypassed (#62).
+        """
+        if isinstance(model, str):
+            _MODEL_FUNCS = {'judd_wright': self._judd_wright,
+                            'power_law': self._power_law,
+                            'linear': self._linear}
+            if model not in _MODEL_FUNCS:
+                raise ValueError(
+                    f"Unknown knockdown model {model!r}. "
+                    f"Use one of {sorted(_MODEL_FUNCS)} or pass a callable."
+                )
+            return _MODEL_FUNCS[model], False
+        # User-supplied callable.
+        self._validate_user_kd_callable(model, mode)
+        return model, True
+
+    def apply_loading(self, mode: str = 'compression',
+                      model: Union[str, Callable[[float, str], float]] = 'judd_wright'):
         """Compute per-node knockdown for a given loading mode and model.
 
         Populates ``self.nodal_knockdown`` (shape ``(n_nodes,)``, values in
@@ -1339,9 +1417,17 @@ class EmpiricalSolver:
         mode : {'compression', 'tension', 'shear', 'ilss', 'transverse_tension'}
             Loading mode that selects the pristine strength and the
             mode-specific empirical coefficient.
-        model : {'judd_wright', 'power_law', 'linear'}
-            Empirical knockdown form (see README "Empirical Strength
-            Knockdown").
+        model : str or callable
+            Empirical knockdown form. A string in
+            ``{'judd_wright', 'power_law', 'linear'}`` dispatches to the
+            built-in model with its layup-scaled coefficient. Alternatively,
+            a callable matching the contract
+            ``model(Vp: float, mode: str) -> float ∈ [0, 1]`` plugs in a
+            user-defined knockdown law. User callables own their own
+            coefficients, so the internal layup scaling is bypassed; the
+            discrete-void SCF post-step still applies so caller-defined
+            knockdowns and explicit voids compose the same way as the
+            built-in models.
 
         Notes
         -----
@@ -1357,55 +1443,85 @@ class EmpiricalSolver:
         **signed** FE stresses and strains in Voigt order
         ``[11, 22, 33, 23, 13, 12]`` (engineering shear).
         """
-        _MODEL_FUNCS = {'judd_wright': self._judd_wright,
-                        'power_law': self._power_law,
-                        'linear': self._linear}
-        if model not in _MODEL_FUNCS:
-            raise ValueError(
-                f"Unknown knockdown model {model!r}. "
-                f"Use one of {sorted(_MODEL_FUNCS)}."
-            )
         if mode not in self.PRISTINE_STRENGTH_KEY:
             raise ValueError(
                 f"Unknown loading mode {mode!r}. "
                 f"Use one of {sorted(self.PRISTINE_STRENGTH_KEY)}."
             )
-        model_func = _MODEL_FUNCS[model]
+        model_func, _is_user = self._resolve_knockdown_model(model, mode)
         kd = np.array([model_func(Vp, mode) for Vp in self.mesh.porosity])
         kd = self._apply_discrete_void_scf(kd, mode)
         self.nodal_knockdown = kd  # type: ignore[assignment]  # lazy-init attr starts None
 
-    def get_failure_load(self, mode: str = 'compression', model: str = 'judd_wright') -> dict:
+    def get_failure_load(self, mode: str = 'compression',
+                         model: Union[str, Callable[[float, str], float]]
+                         = 'judd_wright') -> dict:
         """Compute failure load using specimen-average porosity.
 
         The knockdown is evaluated at the mean Vp (matching how the original
         correlations were calibrated), not at the local peak.  Per-node
         knockdown is still computed for visualization via apply_loading().
+
+        Parameters
+        ----------
+        mode : str
+            Loading mode; see :meth:`apply_loading`.
+        model : str or callable
+            Either a built-in name (``'judd_wright'``, ``'power_law'``,
+            ``'linear'``) or a user-supplied callable with signature
+            ``model(Vp: float, mode: str) -> float ∈ [0, 1]``. User
+            callables bypass the layup-scaled coefficient table (the caller
+            owns their model).
         """
         self.apply_loading(mode, model)
         sigma_0 = self._get_pristine_strength(mode)
 
         # Use specimen-average Vp for knockdown (matches calibration basis)
         Vp_mean = self.mesh.porosity_field.Vp
-        model_func = {'judd_wright': self._judd_wright,
-                      'power_law': self._power_law,
-                      'linear': self._linear}[model]
-        mean_kd = model_func(Vp_mean, mode)
+        model_func, _is_user = self._resolve_knockdown_model(model, mode)
+        mean_kd = float(model_func(Vp_mean, mode))
+
+        # Record a JSON-friendly label even when the caller passes a
+        # callable (lambdas/closures don't round-trip through json.dumps).
+        model_label = model if isinstance(model, str) else getattr(
+            model, '__name__', 'user_callable')
 
         return {
             'failure_stress': sigma_0 * mean_kd,
             'knockdown': mean_kd,
             'critical_location': [0.0, 0.0, 0.0],
-            'model': model,
+            'model': model_label,
         }
 
-    def get_all_failure_loads(self) -> dict:
-        results = {}
+    def get_all_failure_loads(
+            self,
+            extra_models: Optional[Dict[str, Callable[[float, str], float]]] = None
+    ) -> dict:
+        """Compute failure loads for all modes against all built-in models.
+
+        Parameters
+        ----------
+        extra_models : dict[str, callable], optional
+            User-supplied knockdown callables to evaluate alongside the
+            built-ins. Each entry's key is the label used in the result
+            dict; its value must be a callable matching the contract
+            ``model(Vp: float, mode: str) -> float ∈ [0, 1]``. The built-in
+            three models are always included.
+        """
+        results: Dict[str, Dict[str, dict]] = {}
+        all_models: List[Tuple[str, Union[str, Callable[[float, str], float]]]] = [
+            ('judd_wright', 'judd_wright'),
+            ('power_law', 'power_law'),
+            ('linear', 'linear'),
+        ]
+        if extra_models:
+            for label, fn in extra_models.items():
+                all_models.append((str(label), fn))
         for mode in ['compression', 'tension', 'shear', 'ilss',
                      'transverse_tension']:
             results[mode] = {}
-            for model in ['judd_wright', 'power_law', 'linear']:
-                results[mode][model] = self.get_failure_load(mode, model)
+            for label, model in all_models:
+                results[mode][label] = self.get_failure_load(mode, model)
         return results
 
 
@@ -3459,15 +3575,26 @@ class FieldResults:
     strain_local : np.ndarray
         Shape (n_elem, n_gp, 6) strain in local coordinates.
     max_failure_index : float
-        Maximum Tsai-Wu failure index across all Gauss points.
+        Maximum failure index across all Gauss points (criterion-dependent).
     knockdown : float
         Stiffness knockdown factor (modulus ratio: E_porous/E_pristine).
     per_element_failure_index : np.ndarray or None
-        Shape (n_elem,) max-over-Gauss-point Tsai-Wu index per element.
+        Shape (n_elem,) max-over-Gauss-point failure index per element.
         Optional (defaults to ``None`` for back-compatibility with callers
         that construct ``FieldResults`` directly); populated by
         ``FESolver.solve`` and consumed by the VTK export so failure
         hot-spots can be sliced in ParaView.
+    failure_criterion : str
+        Which failure criterion was used to produce ``max_failure_index`` and
+        ``per_element_failure_index``. One of ``'tsai_wu'`` (default for
+        back-compat), ``'hashin'``, or ``'max_stress'``.
+    failure_mode_indices : dict or None
+        Per-mode breakdown of the maximum failure index across the model with
+        keys ``'fiber_t'``, ``'fiber_c'``, ``'matrix_t'``, ``'matrix_c'``,
+        ``'shear'`` (plus ``'max_fi'``). For Tsai-Wu the per-mode entries are
+        ``NaN`` (the polynomial does not separate modes); for ``max_stress``
+        the unused entries are zero. Lets the GUI and JSON exporter report
+        the dominant failure mode, not just severity.
 
     Notes
     -----
@@ -3490,6 +3617,8 @@ class FieldResults:
     max_failure_index: float
     knockdown: float
     per_element_failure_index: Optional[np.ndarray] = None
+    failure_criterion: str = 'tsai_wu'
+    failure_mode_indices: Optional[Dict[str, float]] = None
 
     def __repr__(self) -> str:
         n_nodes = self.displacement.shape[0] if self.displacement is not None else 0
@@ -3684,20 +3813,35 @@ class FESolver:
         Optional list of ply angles (degrees). If None, uses mesh defaults.
     """
 
+    #: Supported failure criteria for :meth:`solve`. Used both at runtime
+    #: (for validation) and as the documented enumeration.
+    SUPPORTED_FAILURE_CRITERIA: Tuple[str, ...] = (
+        'tsai_wu', 'hashin', 'max_stress')
+
     def __init__(self, mesh: CompositeMesh, material: MaterialProperties,
                  porosity_field: PorosityField,
-                 ply_angles: Optional[List[float]] = None) -> None:
+                 ply_angles: Optional[List[float]] = None,
+                 failure_criterion: Literal[
+                     'tsai_wu', 'hashin', 'max_stress'] = 'tsai_wu') -> None:
         self.mesh = mesh
         self.material = material
         self.porosity_field = porosity_field
         self.ply_angles = ply_angles
         self.assembler = GlobalAssembler(mesh, material, porosity_field)
         self.bc_handler = BoundaryHandler(mesh)
+        if failure_criterion not in self.SUPPORTED_FAILURE_CRITERIA:
+            raise ValueError(
+                f"Unknown failure_criterion {failure_criterion!r}. "
+                f"Use one of {list(self.SUPPORTED_FAILURE_CRITERIA)}."
+            )
+        self.failure_criterion = failure_criterion
 
     def solve(self, loading: str = 'compression',
               applied_strain: float = -0.01,
               applied_load: float = -10.0,
-              verbose: bool = False) -> FieldResults:
+              verbose: bool = False,
+              failure_criterion: Optional[Literal[
+                  'tsai_wu', 'hashin', 'max_stress']] = None) -> FieldResults:
         """Solve the static FE problem.
 
         Parameters
@@ -3714,6 +3858,12 @@ class FESolver:
             modes.
         verbose : bool
             Print progress information.
+        failure_criterion : {'tsai_wu', 'hashin', 'max_stress'}, optional
+            Per-call override for the failure criterion. Defaults to the
+            value passed to :meth:`__init__` (``'tsai_wu'`` if unset). When
+            ``'tsai_wu'`` the result is bit-identical to the historical
+            behavior; ``'hashin'`` and ``'max_stress'`` populate the
+            per-mode breakdown on :class:`FieldResults`.
 
         Returns
         -------
@@ -3722,6 +3872,13 @@ class FESolver:
         """
         import time
         t0 = time.perf_counter()
+        criterion = failure_criterion if failure_criterion is not None \
+            else self.failure_criterion
+        if criterion not in self.SUPPORTED_FAILURE_CRITERIA:
+            raise ValueError(
+                f"Unknown failure_criterion {criterion!r}. "
+                f"Use one of {list(self.SUPPORTED_FAILURE_CRITERIA)}."
+            )
 
         # 0. Mesh quality check
         check_mesh_quality(self.mesh, verbose=verbose)
@@ -3822,10 +3979,13 @@ class FESolver:
                 stress_local[e, g] = T_sigma @ sig_g[g]
                 strain_local[e, g] = T_eps @ eps_g[g]
 
-        # 6. Evaluate Tsai-Wu at each GP. per_elem_fi[e] is the max-over-GP
-        #    failure index for element e (0.0 for skipped void elements); the
-        #    scalar max_fi is its overall maximum.
-        max_fi, per_elem_fi = self._evaluate_tsai_wu(stress_local)
+        # 6. Evaluate the selected failure criterion at each GP.
+        #    per_elem_fi[e] is the max-over-GP failure index for element e
+        #    (0.0 for skipped void elements); the scalar max_fi is its
+        #    overall maximum. mode_indices captures the per-mode breakdown
+        #    (NaN entries for Tsai-Wu, which does not separate modes).
+        max_fi, per_elem_fi, mode_indices = self._evaluate_failure(
+            stress_local, criterion=criterion)
 
         # 7. Compute knockdown as average-stress ratio (porous / pristine)
         # Both numerator and denominator use the same 3D FE framework so that
@@ -3874,7 +4034,7 @@ class FESolver:
             t3 = time.perf_counter()
             logger.info("  Post-processing time: %.2f s", t3 - t1)
             logger.info("Total solve time: %.2f s", t3 - t0)
-            logger.info("  Max Tsai-Wu FI: %.4f", max_fi)
+            logger.info("  Max %s FI: %.4f", criterion, max_fi)
             logger.info("  Knockdown factor: %.4f", knockdown)
 
         return FieldResults(
@@ -3886,46 +4046,145 @@ class FESolver:
             max_failure_index=max_fi,
             knockdown=knockdown,
             per_element_failure_index=per_elem_fi,
+            failure_criterion=criterion,
+            failure_mode_indices=mode_indices,
         )
 
-    def _evaluate_tsai_wu(self, stress_local: np.ndarray
-                          ) -> Tuple[float, np.ndarray]:
-        """Evaluate Tsai-Wu failure index at all Gauss points.
+    #: Empty per-mode failure-index dict used when an element is skipped
+    #: (void) or for criteria that do not populate a particular mode.
+    _EMPTY_MODE_FI: Dict[str, float] = {
+        'max_fi': 0.0,
+        'fiber_t': 0.0,
+        'fiber_c': 0.0,
+        'matrix_t': 0.0,
+        'matrix_c': 0.0,
+        'shear': 0.0,
+    }
 
-        Strengths are degraded per-element based on the element's average
-        porosity using the Mori-Tanaka stiffness ratio approach.  Void
-        elements (porosity > 0.95) are skipped (FI = 0, they carry no load).
+    def _degraded_strengths(self, elem_Vp: float
+                            ) -> Tuple[float, float, float, float, float, float]:
+        """Return per-element porosity-degraded ply strengths.
+
+        Implements the strength-degradation block shared by all failure
+        criteria. Fiber-direction strengths (``Xt``, ``Xc``) follow the rule-
+        of-mixtures fiber ratio (matrix porosity has only a weak indirect
+        effect via ``E_m_eff``); transverse and shear strengths
+        (``Yt``, ``Yc``, ``S12``, ``S23``) follow the Mori-Tanaka matrix
+        stiffness ratio. Strengths are clamped to a small numerical floor so
+        the per-criterion polynomial cannot divide by zero.
+
+        Parameters
+        ----------
+        elem_Vp : float
+            Element-average void volume fraction in [0, 1].
+
+        Returns
+        -------
+        (Xt_s, Xc_s, Yt_s, Yc_s, S12_s, S23_s) : tuple of floats
+            Floor-clamped degraded strengths in MPa.
+        """
+        mat = self.material
+        C_m_pristine = mat.get_isotropic_matrix_stiffness()
+        if elem_Vp > 1e-12:
+            C_eff = _mt_effective_stiffness(
+                C_m_pristine, elem_Vp,
+                self.porosity_field.void_shape_radii,
+                mat.matrix_poisson)
+            # Matrix stiffness degradation ratio (matrix-dominated)
+            r_matrix = np.sqrt(max(C_eff[0, 0] / C_m_pristine[0, 0], 0.0))
+            # Fiber-direction ratio: scale by ROM ratio (much weaker effect)
+            E_m = mat.matrix_modulus
+            E_m_eff_approx = E_m * max(C_eff[0, 0] / C_m_pristine[0, 0], 0.0)
+            Vf = mat.fiber_volume_fraction
+            Vm = 1.0 - Vf
+            r_fiber = (Vf * mat.fiber_modulus + Vm * E_m_eff_approx) / \
+                      (Vf * mat.fiber_modulus + Vm * E_m)
+            r_fiber = np.sqrt(max(r_fiber, 0.0))  # sqrt for strength vs stiffness
+        else:
+            r_matrix = 1.0
+            r_fiber = 1.0
+
+        Xt = mat.sigma_1t * r_fiber
+        Xc = mat.sigma_1c * r_fiber
+        Yt = mat.sigma_2t * r_matrix
+        Yc = mat.sigma_2c * r_matrix
+        S12 = mat.tau_12 * r_matrix
+        S23 = mat.tau_ilss * r_matrix
+
+        # Strengths approaching zero make the 1/X reciprocals overflow to
+        # inf; clamp to a numerical floor so a heavily-degraded element
+        # produces a large-but-finite failure index instead of poisoning the
+        # global max with inf/NaN.
+        strength_floor = 1e-3  # MPa
+        return (max(Xt, strength_floor),
+                max(Xc, strength_floor),
+                max(Yt, strength_floor),
+                max(Yc, strength_floor),
+                max(S12, strength_floor),
+                max(S23, strength_floor))
+
+    def _evaluate_failure(self, stress_local: np.ndarray,
+                          criterion: str = 'tsai_wu'
+                          ) -> Tuple[float, np.ndarray, Dict[str, float]]:
+        """Evaluate the chosen failure criterion at every Gauss point.
+
+        Dispatches to :meth:`_evaluate_tsai_wu`, :meth:`_evaluate_hashin`,
+        or :meth:`_evaluate_max_stress` element by element. Per-element
+        strength degradation is computed once via :meth:`_degraded_strengths`
+        and reused by the per-criterion polynomials.
 
         Parameters
         ----------
         stress_local : np.ndarray
             Shape (n_elem, n_gp, 6) local stresses.
+        criterion : {'tsai_wu', 'hashin', 'max_stress'}
+            Failure criterion to apply.
 
         Returns
         -------
         max_fi : float
-            Maximum Tsai-Wu failure index over all elements/Gauss points.
+            Overall maximum failure index.
         per_elem_fi : np.ndarray
-            Shape (n_elem,) max-over-Gauss-point Tsai-Wu index for each
-            element (0.0 for skipped void elements). Retained so the VTK
-            export can render the spatial distribution of failure hot-spots.
+            Shape (n_elem,) max-over-Gauss-point failure index per element
+            (0.0 for skipped void elements).
+        mode_indices : dict
+            Per-mode breakdown at the element/GP where ``max_fi`` is
+            attained. Keys: ``'max_fi'``, ``'fiber_t'``, ``'fiber_c'``,
+            ``'matrix_t'``, ``'matrix_c'``, ``'shear'``. For Tsai-Wu the
+            per-mode entries are ``NaN`` (the coupled polynomial does not
+            separate modes).
         """
-        mat = self.material
-        C_m_pristine = mat.get_isotropic_matrix_stiffness()
+        if criterion not in self.SUPPORTED_FAILURE_CRITERIA:
+            raise ValueError(
+                f"Unknown failure criterion {criterion!r}. "
+                f"Use one of {list(self.SUPPORTED_FAILURE_CRITERIA)}."
+            )
 
-        max_fi = 0.0
-        n_elem, n_gp, _ = stress_local.shape
+        n_elem, _, _ = stress_local.shape
         per_elem_fi = np.zeros(n_elem, dtype=float)
-        # Defense in depth: a single non-finite value in the porosity field
-        # (e.g. from upstream NaN propagation) silently corrupts elem_Vp via
-        # np.mean; clip + isfinite check stops it from reaching Tsai-Wu.
+        # Defense in depth: non-finite porosity silently corrupts elem_Vp.
         if not np.all(np.isfinite(self.mesh.porosity)):  # type: ignore[call-overload]
             raise ValueError(
-                "mesh.porosity contains non-finite values; refusing to evaluate "
-                "Tsai-Wu on a corrupted porosity field."
+                f"mesh.porosity contains non-finite values; refusing to evaluate "
+                f"{criterion} on a corrupted porosity field."
             )
+
+        max_fi = 0.0
+        best_mode_indices: Dict[str, float] = dict(self._EMPTY_MODE_FI)
+        if criterion == 'tsai_wu':
+            # Tsai-Wu polynomial couples all components — per-mode breakdown
+            # is undefined. Surface NaN sentinels so downstream consumers see
+            # "criterion did not separate modes" rather than spurious zeros.
+            best_mode_indices = {
+                'max_fi': 0.0,
+                'fiber_t': float('nan'),
+                'fiber_c': float('nan'),
+                'matrix_t': float('nan'),
+                'matrix_c': float('nan'),
+                'shear': float('nan'),
+            }
+
         for e in range(n_elem):
-            # Compute per-element porosity-degraded strengths
             elem_Vp = float(np.mean(self.mesh.porosity[self.mesh.elements[e]]))
             # fp noise can push elem_Vp ~1e-15 above 1.0 — clip silently.
             elem_Vp = float(np.clip(elem_Vp, 0.0, 1.0))
@@ -3934,98 +4193,188 @@ class FESolver:
             if elem_Vp > 0.95:
                 continue
 
-            if elem_Vp > 1e-12:
-                # Component-wise strength degradation:
-                # Fiber-direction strengths (Xt, Xc) are fiber-dominated — barely
-                # affected by matrix porosity. Transverse/shear strengths (Yt, Yc,
-                # S12, S23) are matrix-dominated — strongly affected.
-                C_eff = _mt_effective_stiffness(
-                    C_m_pristine, elem_Vp,
-                    self.porosity_field.void_shape_radii,
-                    mat.matrix_poisson)
-                # Matrix stiffness degradation ratio (for matrix-dominated properties)
-                r_matrix = np.sqrt(max(C_eff[0, 0] / C_m_pristine[0, 0], 0.0))
-                # Fiber-direction ratio: much weaker effect (scale by ROM ratio)
-                E_m = mat.matrix_modulus
-                E_m_eff_approx = E_m * max(C_eff[0, 0] / C_m_pristine[0, 0], 0.0)
-                Vf = mat.fiber_volume_fraction
-                Vm = 1.0 - Vf
-                r_fiber = (Vf * mat.fiber_modulus + Vm * E_m_eff_approx) / \
-                          (Vf * mat.fiber_modulus + Vm * E_m)
-                r_fiber = np.sqrt(max(r_fiber, 0.0))  # sqrt for strength vs stiffness
-            else:
-                r_matrix = 1.0
-                r_fiber = 1.0
-
-            # Degrade strengths per component
-            Xt = mat.sigma_1t * r_fiber   # fiber-dominated
-            Xc = mat.sigma_1c * r_fiber   # fiber-dominated
-            Yt = mat.sigma_2t * r_matrix  # matrix-dominated
-            Yc = mat.sigma_2c * r_matrix  # matrix-dominated
-            S12 = mat.tau_12 * r_matrix   # matrix-dominated
-            S23 = mat.tau_ilss * r_matrix # matrix-dominated
-
-            # Tsai-Wu coefficients (recomputed per element).
-            # Strengths approaching zero make the 1/X reciprocals overflow to
-            # inf; clamp to a numerical floor so that a heavily-degraded element
-            # produces a large-but-finite failure index instead of poisoning
-            # max_fi (and therefore the JSON-exported knockdown) with inf/NaN.
-            strength_floor = 1e-3  # MPa
-            Xt_s = max(Xt, strength_floor)
-            Xc_s = max(Xc, strength_floor)
-            Yt_s = max(Yt, strength_floor)
-            Yc_s = max(Yc, strength_floor)
-            S12_s = max(S12, strength_floor)
-            S23_s = max(S23, strength_floor)
-
-            with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
-                F1 = 1.0 / Xt_s - 1.0 / Xc_s
-                F2 = 1.0 / Yt_s - 1.0 / Yc_s
-                F3 = F2
-                F11 = 1.0 / (Xt_s * Xc_s)
-                F22 = 1.0 / (Yt_s * Yc_s)
-                F33 = F22
-                F44 = 1.0 / S23_s**2
-                F55 = 1.0 / S12_s**2
-                F66 = 1.0 / S12_s**2
-                # F12, F23 require sqrt of a product. Guard against negative
-                # products from any future mis-degraded coefficients (currently
-                # impossible because F11/F22/F33 are 1/(positive*positive),
-                # but cheap insurance for refactors).
-                F11_F22 = max(F11 * F22, 0.0)
-                F22_F33 = max(F22 * F33, 0.0)
-                F12 = -0.5 * np.sqrt(F11_F22)
-                F13 = F12
-                F23 = -0.5 * np.sqrt(F22_F33)
-
-            # Vectorize across all Gauss points of this element (#41).
-            # stress_local[e] is shape (n_gp, 6); the Tsai-Wu polynomial is
-            # element-wise, so the inner Gauss loop collapses to a single
-            # numpy expression of length n_gp.
+            strengths = self._degraded_strengths(elem_Vp)
             s_all = stress_local[e]  # (n_gp, 6)
-            fi_per_gp = (
-                F1 * s_all[:, 0] + F2 * s_all[:, 1] + F3 * s_all[:, 2]
-                + F11 * s_all[:, 0]**2 + F22 * s_all[:, 1]**2 + F33 * s_all[:, 2]**2
-                + F44 * s_all[:, 3]**2 + F55 * s_all[:, 4]**2 + F66 * s_all[:, 5]**2
-                + 2 * F12 * s_all[:, 0] * s_all[:, 1]
-                + 2 * F13 * s_all[:, 0] * s_all[:, 2]
-                + 2 * F23 * s_all[:, 1] * s_all[:, 2]
-            )
-            if not np.all(np.isfinite(fi_per_gp)):
-                bad_g = int(np.argmax(~np.isfinite(fi_per_gp)))
-                raise ValueError(
-                    f"Tsai-Wu failure index is non-finite at element {e}, "
-                    f"Gauss point {bad_g} (Vp={elem_Vp:.4f}, "
-                    f"stress={s_all[bad_g].tolist()}). This usually indicates "
-                    f"a degenerate stiffness or strength matrix; refine the "
-                    f"mesh or check input bounds."
-                )
-            elem_max = float(fi_per_gp.max())
-            per_elem_fi[e] = elem_max
-            if elem_max > max_fi:
-                max_fi = elem_max
 
-        return float(max_fi), per_elem_fi
+            if criterion == 'tsai_wu':
+                fi_per_gp = self._evaluate_tsai_wu(s_all, strengths, e, elem_Vp)
+                elem_max = float(fi_per_gp.max())
+                per_elem_fi[e] = elem_max
+                if elem_max > max_fi:
+                    max_fi = elem_max
+                    best_mode_indices['max_fi'] = elem_max
+            else:
+                if criterion == 'hashin':
+                    mode_fi_per_gp = self._evaluate_hashin(s_all, strengths)
+                else:  # 'max_stress'
+                    mode_fi_per_gp = self._evaluate_max_stress(s_all, strengths)
+                # mode_fi_per_gp is a dict of arrays, each shape (n_gp,).
+                fi_per_gp = mode_fi_per_gp['max_fi']
+                if not np.all(np.isfinite(fi_per_gp)):
+                    bad_g = int(np.argmax(~np.isfinite(fi_per_gp)))
+                    raise ValueError(
+                        f"{criterion} failure index is non-finite at element "
+                        f"{e}, Gauss point {bad_g} (Vp={elem_Vp:.4f}, "
+                        f"stress={s_all[bad_g].tolist()})."
+                    )
+                elem_max = float(fi_per_gp.max())
+                per_elem_fi[e] = elem_max
+                if elem_max > max_fi:
+                    max_fi = elem_max
+                    g_max = int(np.argmax(fi_per_gp))
+                    best_mode_indices = {
+                        'max_fi': elem_max,
+                        'fiber_t': float(mode_fi_per_gp['fiber_t'][g_max]),
+                        'fiber_c': float(mode_fi_per_gp['fiber_c'][g_max]),
+                        'matrix_t': float(mode_fi_per_gp['matrix_t'][g_max]),
+                        'matrix_c': float(mode_fi_per_gp['matrix_c'][g_max]),
+                        'shear': float(mode_fi_per_gp['shear'][g_max]),
+                    }
+
+        return float(max_fi), per_elem_fi, best_mode_indices
+
+    def _evaluate_tsai_wu(self, s_all: np.ndarray,
+                          strengths: Tuple[float, float, float, float, float, float],
+                          e: int, elem_Vp: float) -> np.ndarray:
+        """Tsai-Wu polynomial evaluated for one element's Gauss points.
+
+        Bit-identical to the historical implementation. Returns the per-GP
+        failure index array (shape ``(n_gp,)``).
+        """
+        Xt_s, Xc_s, Yt_s, Yc_s, S12_s, S23_s = strengths
+        with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+            F1 = 1.0 / Xt_s - 1.0 / Xc_s
+            F2 = 1.0 / Yt_s - 1.0 / Yc_s
+            F3 = F2
+            F11 = 1.0 / (Xt_s * Xc_s)
+            F22 = 1.0 / (Yt_s * Yc_s)
+            F33 = F22
+            F44 = 1.0 / S23_s**2
+            F55 = 1.0 / S12_s**2
+            F66 = 1.0 / S12_s**2
+            # F12, F23 use sqrt of a product. Guard against negative
+            # products in case future refactors break the F11/F22/F33 sign.
+            F11_F22 = max(F11 * F22, 0.0)
+            F22_F33 = max(F22 * F33, 0.0)
+            F12 = -0.5 * np.sqrt(F11_F22)
+            F13 = F12
+            F23 = -0.5 * np.sqrt(F22_F33)
+
+        # Vectorize across all Gauss points of this element (#41).
+        fi_per_gp = (
+            F1 * s_all[:, 0] + F2 * s_all[:, 1] + F3 * s_all[:, 2]
+            + F11 * s_all[:, 0]**2 + F22 * s_all[:, 1]**2 + F33 * s_all[:, 2]**2
+            + F44 * s_all[:, 3]**2 + F55 * s_all[:, 4]**2 + F66 * s_all[:, 5]**2
+            + 2 * F12 * s_all[:, 0] * s_all[:, 1]
+            + 2 * F13 * s_all[:, 0] * s_all[:, 2]
+            + 2 * F23 * s_all[:, 1] * s_all[:, 2]
+        )
+        if not np.all(np.isfinite(fi_per_gp)):
+            bad_g = int(np.argmax(~np.isfinite(fi_per_gp)))
+            raise ValueError(
+                f"Tsai-Wu failure index is non-finite at element {e}, "
+                f"Gauss point {bad_g} (Vp={elem_Vp:.4f}, "
+                f"stress={s_all[bad_g].tolist()}). This usually indicates "
+                f"a degenerate stiffness or strength matrix; refine the "
+                f"mesh or check input bounds."
+            )
+        return fi_per_gp
+
+    def _evaluate_hashin(self, s_all: np.ndarray,
+                         strengths: Tuple[float, float, float, float, float, float]
+                         ) -> Dict[str, np.ndarray]:
+        """2D Hashin failure indices for unidirectional plies.
+
+        Implements the standard four-mode Hashin criterion (Hashin, 1980).
+        Indices are computed per Gauss point on the in-plane local stresses
+        ``(σ_11, σ_22, τ_12)``; ``σ_33`` and out-of-plane shears are ignored
+        because the standard formulation is 2D. The ``shear`` slot returns
+        the in-plane ``(τ_12 / S_12)^2`` contribution for completeness.
+
+        Returns a dict of per-GP arrays:
+        ``{'max_fi', 'fiber_t', 'fiber_c', 'matrix_t', 'matrix_c', 'shear'}``.
+        """
+        Xt_s, Xc_s, Yt_s, Yc_s, S12_s, S23_s = strengths
+        sigma_11 = s_all[:, 0]
+        sigma_22 = s_all[:, 1]
+        tau_12 = s_all[:, 5]
+
+        # Fiber tension: σ_11 >= 0
+        ft = (sigma_11 / Xt_s) ** 2 + (tau_12 / S12_s) ** 2
+        ft = np.where(sigma_11 >= 0.0, ft, 0.0)
+
+        # Fiber compression: σ_11 < 0
+        fc = (sigma_11 / Xc_s) ** 2
+        fc = np.where(sigma_11 < 0.0, fc, 0.0)
+
+        # Matrix tension: σ_22 >= 0
+        mt = (sigma_22 / Yt_s) ** 2 + (tau_12 / S12_s) ** 2
+        mt = np.where(sigma_22 >= 0.0, mt, 0.0)
+
+        # Matrix compression: σ_22 < 0
+        mc_term = ((Yc_s / (2.0 * S23_s)) ** 2 - 1.0) * (sigma_22 / Yc_s)
+        mc = (sigma_22 / (2.0 * S23_s)) ** 2 + mc_term + (tau_12 / S12_s) ** 2
+        mc = np.where(sigma_22 < 0.0, mc, 0.0)
+
+        shear = (tau_12 / S12_s) ** 2
+
+        max_fi = np.maximum.reduce([ft, fc, mt, mc])
+        return {
+            'max_fi': max_fi,
+            'fiber_t': ft,
+            'fiber_c': fc,
+            'matrix_t': mt,
+            'matrix_c': mc,
+            'shear': shear,
+        }
+
+    def _evaluate_max_stress(self, s_all: np.ndarray,
+                             strengths: Tuple[float, float, float, float, float, float]
+                             ) -> Dict[str, np.ndarray]:
+        """Maximum-stress failure indices.
+
+        ``FI_i = |σ_i| / X_i_allowable`` per component (signed split for
+        normals: tensile vs compressive allowable). The reported ``max_fi``
+        is the maximum across all five mode/component buckets. Returns the
+        same per-GP dict shape as :meth:`_evaluate_hashin`; unused entries
+        are zeroed (rather than NaN) since each mode is well-defined for
+        max-stress.
+        """
+        Xt_s, Xc_s, Yt_s, Yc_s, S12_s, S23_s = strengths
+        sigma_11 = s_all[:, 0]
+        sigma_22 = s_all[:, 1]
+        sigma_33 = s_all[:, 2]
+        tau_23 = s_all[:, 3]
+        tau_13 = s_all[:, 4]
+        tau_12 = s_all[:, 5]
+
+        ft = np.where(sigma_11 >= 0.0, sigma_11 / Xt_s, 0.0)
+        fc = np.where(sigma_11 < 0.0, -sigma_11 / Xc_s, 0.0)
+        # Matrix uses worst of σ_22 and σ_33 (transverse normals share the
+        # same in-plane transverse strength).
+        mt_22 = np.where(sigma_22 >= 0.0, sigma_22 / Yt_s, 0.0)
+        mt_33 = np.where(sigma_33 >= 0.0, sigma_33 / Yt_s, 0.0)
+        mt = np.maximum(mt_22, mt_33)
+        mc_22 = np.where(sigma_22 < 0.0, -sigma_22 / Yc_s, 0.0)
+        mc_33 = np.where(sigma_33 < 0.0, -sigma_33 / Yc_s, 0.0)
+        mc = np.maximum(mc_22, mc_33)
+        # Shear: worst of all three engineering shear components against the
+        # appropriate allowable (S_23 for the 23 plane, S_12 for 12 / 13).
+        shear = np.maximum.reduce([
+            np.abs(tau_12) / S12_s,
+            np.abs(tau_13) / S12_s,
+            np.abs(tau_23) / S23_s,
+        ])
+
+        max_fi = np.maximum.reduce([ft, fc, mt, mc, shear])
+        return {
+            'max_fi': max_fi,
+            'fiber_t': ft,
+            'fiber_c': fc,
+            'matrix_t': mt,
+            'matrix_c': mc,
+            'shear': shear,
+        }
 
     @staticmethod
     def export_results(field_results: 'FieldResults', filename: str,
@@ -4115,6 +4464,14 @@ class FESolver:
             },
             'failure': {
                 'max_tsai_wu_index': float(field_results.max_failure_index),
+                'max_failure_index': float(field_results.max_failure_index),
+                'criterion': str(getattr(field_results,
+                                          'failure_criterion', 'tsai_wu')),
+                'mode_indices': (
+                    {k: float(v) for k, v in field_results.failure_mode_indices.items()}
+                    if getattr(field_results, 'failure_mode_indices', None)
+                    is not None else None
+                ),
                 'knockdown_factor': float(field_results.knockdown),
             },
         }
