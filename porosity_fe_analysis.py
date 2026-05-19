@@ -1611,7 +1611,7 @@ class FEVisualizer:
         else:
             kd = mesh.stiffness_reduction[start:end].reshape(ny1, nx1)
 
-        im = ax.contourf(X, Y, kd, levels=20, cmap='viridis')
+        im = ax.contourf(X, Y, kd, levels=20, cmap='cividis')
         plt.colorbar(im, ax=ax, label='Stiffness Retention (fraction)')
         ax.set_xlabel('x (mm)', fontsize=12)
         ax.set_ylabel('y (mm)', fontsize=12)
@@ -1642,7 +1642,7 @@ class FEVisualizer:
         scf_max = scf['compression']
         field = np.where(dist < 0, 0, 1.0 + (scf_max - 1) * np.exp(-dist / max(void_geometry.radii)))
 
-        im = ax.contourf(X, Y, field, levels=30, cmap='plasma')
+        im = ax.contourf(X, Y, field, levels=30, cmap='magma')
         plt.colorbar(im, ax=ax, label=LABELS['scf'])
         ax.set_xlabel('x (mm)', fontsize=12)
         ax.set_ylabel('y (mm)', fontsize=12)
