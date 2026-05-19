@@ -3703,7 +3703,8 @@ class FESolver:
     @staticmethod
     def export_results(field_results: 'FieldResults', filename: str,
                        fmt: str = 'json',
-                       mesh: Optional['CompositeMesh'] = None) -> None:
+                       mesh: Optional['CompositeMesh'] = None,
+                       include_raw: bool = False) -> None:
         """Export FE results to a JSON summary or a VTK field file.
 
         With ``fmt='json'`` (the default, unchanged legacy behavior) this
@@ -3728,6 +3729,12 @@ class FESolver:
             ``'json'`` (default) or ``'vtk'``.
         mesh : CompositeMesh, optional
             Required when ``fmt='vtk'`` (supplies geometry/connectivity).
+        include_raw : bool
+            When ``True`` (and ``fmt='json'``), also write a sidecar
+            ``<filename>.npz`` containing the raw displacement/stress/strain
+            arrays so a full audit can re-derive the per-key summary
+            statistics. Default ``False`` so existing outputs are not
+            bloated (#55).
         """
         fmt = str(fmt).lower()
         if fmt == 'vtk':
@@ -3791,6 +3798,22 @@ class FESolver:
             'provenance': _build_provenance(),
             **results_data,
         }
+        if include_raw:
+            # Sidecar file path lives next to the JSON so users see them
+            # together; ``np.savez`` will append ``.npz`` if missing.
+            npz_path = f"{filename}.npz"
+            arrays = {
+                'displacement': np.asarray(field_results.displacement),
+                'stress_global': np.asarray(field_results.stress_global),
+                'stress_local': np.asarray(field_results.stress_local),
+                'strain_global': np.asarray(field_results.strain_global),
+                'strain_local': np.asarray(field_results.strain_local),
+            }
+            if field_results.per_element_failure_index is not None:
+                arrays['per_element_failure_index'] = np.asarray(
+                    field_results.per_element_failure_index)
+            np.savez(npz_path, **arrays)
+            output['raw_sidecar'] = os.path.basename(npz_path)
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(output, f, indent=2, default=_json_default)
         logger.info("Saved FE results: %s", filename)
@@ -3872,6 +3895,15 @@ def _build_provenance(seed: Optional[int] = None) -> dict:
     Captures software versions, platform, timestamp, optional git commit,
     and the run ``seed`` so that any JSON output can be traced back to the
     exact environment used (#55).
+
+    Field names use two parallel conventions for back-compat: the original
+    ``*_version`` / ``timestamp_utc`` / ``git_commit`` keys plus the shorter
+    ``python`` / ``numpy`` / ``scipy`` / ``git_sha`` / ``generated_utc`` /
+    ``package_version`` aliases from the #55 reproducibility contract.
+
+    The optional ``hostname`` field is opt-in via the
+    ``POROSITY_FE_INCLUDE_HOSTNAME`` env var (set to ``1``/``true``/``yes``)
+    so the default JSON output does not leak workstation names.
     """
     try:
         import importlib.metadata as _ilm
@@ -3889,25 +3921,57 @@ def _build_provenance(seed: Optional[int] = None) -> dict:
         return getattr(mod, "__version__", None) if mod else None
 
     try:
+        # Run git from the directory containing this module so a CLI invoked
+        # from somewhere else still resolves the repo SHA. Graceful fallback
+        # to ``None`` for wheel/sdist installs or untracked checkouts.
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=5,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
         )
         git_commit: Optional[str] = result.stdout.strip() if result.returncode == 0 else None
-    except Exception:
+    except (subprocess.CalledProcessError, FileNotFoundError, Exception):
         git_commit = None
 
-    return {
+    numpy_v = _pkg_version("numpy")
+    scipy_v = _pkg_version("scipy")
+    generated_utc = datetime.datetime.utcnow().isoformat() + "Z"
+
+    prov = {
+        # Envelope schema version, repeated inside the provenance block so a
+        # consumer holding just the provenance dict can still tell what
+        # contract it was emitted under (#55).
+        "schema_version": JSON_SCHEMA_VERSION,
+        # Existing keys (kept for back-compat with the published JSON schema
+        # and downstream consumers).
         "porosity_fe_version": pfe_version,
         "python_version": python_version,
         "platform": platform.platform(),
-        "numpy_version": _pkg_version("numpy"),
-        "scipy_version": _pkg_version("scipy"),
+        "numpy_version": numpy_v,
+        "scipy_version": scipy_v,
         "matplotlib_version": _pkg_version("matplotlib"),
-        "timestamp_utc": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp_utc": generated_utc,
         "seed": seed,
         "git_commit": git_commit,
+        # #55 aliases (short names from the reproducibility contract).
+        "package_version": pfe_version,
+        "python": python_version,
+        "numpy": numpy_v,
+        "scipy": scipy_v,
+        "generated_utc": generated_utc,
+        "git_sha": git_commit,
     }
+
+    # Hostname is opt-in to avoid leaking workstation names in shared
+    # artifacts. Default off (#55).
+    if os.environ.get("POROSITY_FE_INCLUDE_HOSTNAME", "").lower() in (
+            "1", "true", "yes", "on"):
+        try:
+            prov["hostname"] = platform.node() or None
+        except Exception:
+            prov["hostname"] = None
+
+    return prov
 
 
 def save_results_to_json(results: Dict, filename: str):
