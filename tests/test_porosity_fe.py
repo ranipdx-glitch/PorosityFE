@@ -798,9 +798,11 @@ class TestResultsSchemaAndReproducibility:
             d1 = json.load(f)
         with open(p2, encoding='utf-8') as f:
             d2 = json.load(f)
-        # Two back-to-back runs in one process differ only by timestamp.
-        d1['provenance'].pop('timestamp_utc')
-        d2['provenance'].pop('timestamp_utc')
+        # Two back-to-back runs in one process differ only by timestamp;
+        # strip both the legacy and #55-alias timestamp keys before compare.
+        for key in ('timestamp_utc', 'generated_utc'):
+            d1['provenance'].pop(key, None)
+            d2['provenance'].pop(key, None)
         assert d1 == d2
 
     def test_json_default_handles_numpy_and_ndarray(self, tmp_path):
@@ -2772,6 +2774,111 @@ class TestProvenanceInFEExportResults:
         assert isinstance(prov['timestamp_utc'], str) and prov['timestamp_utc']
         assert 'porosity_fe_version' in prov
         assert data['schema_version'] == '1.0'
+
+
+class TestIssue55ProvenanceContract:
+    """Locks in the #55 reproducibility contract field names and behaviors:
+    short-name aliases, opt-in hostname, schema_version inside the block,
+    and the include_raw sidecar for FE exports.
+    """
+
+    def test_provenance_keys_present(self, tmp_path):
+        """All #55 keys (and back-compat aliases) appear in saved JSON."""
+        results = compare_configurations(
+            0.03, configs={'uniform_spherical':
+                           POROSITY_CONFIGS['uniform_spherical']})
+        path = str(tmp_path / "keys.json")
+        save_results_to_json(results, path)
+        with open(path, encoding='utf-8') as f:
+            prov = json.load(f)['provenance']
+        for key in ('schema_version', 'package_version', 'python', 'numpy',
+                    'scipy', 'platform', 'git_sha', 'generated_utc', 'seed'):
+            assert key in prov, f"Missing #55 provenance key: {key}"
+        # generated_utc must be a non-empty ISO-Z timestamp.
+        assert isinstance(prov['generated_utc'], str)
+        assert prov['generated_utc'].endswith('Z')
+
+    def test_byte_identical_reruns(self, tmp_path):
+        """Two back-to-back runs differ only in the timestamp keys."""
+        cfg = {'uniform_spherical': POROSITY_CONFIGS['uniform_spherical']}
+        p1 = str(tmp_path / "a.json")
+        p2 = str(tmp_path / "b.json")
+        save_results_to_json(compare_configurations(0.03, configs=cfg), p1)
+        save_results_to_json(compare_configurations(0.03, configs=cfg), p2)
+        with open(p1, encoding='utf-8') as f:
+            d1 = json.load(f)
+        with open(p2, encoding='utf-8') as f:
+            d2 = json.load(f)
+        for key in ('timestamp_utc', 'generated_utc'):
+            d1['provenance'].pop(key, None)
+            d2['provenance'].pop(key, None)
+        assert d1 == d2
+
+    def test_aliases_match_legacy_keys(self):
+        """Short-name aliases mirror the legacy *_version fields exactly."""
+        prov = _build_provenance(seed=7)
+        assert prov['package_version'] == prov['porosity_fe_version']
+        assert prov['python'] == prov['python_version']
+        assert prov['numpy'] == prov['numpy_version']
+        assert prov['scipy'] == prov['scipy_version']
+        assert prov['git_sha'] == prov['git_commit']
+        assert prov['generated_utc'] == prov['timestamp_utc']
+        assert prov['seed'] == 7
+        assert prov['schema_version'] == JSON_SCHEMA_VERSION
+
+    def test_hostname_opt_in_default_off(self, monkeypatch):
+        """No hostname unless POROSITY_FE_INCLUDE_HOSTNAME=1."""
+        monkeypatch.delenv('POROSITY_FE_INCLUDE_HOSTNAME', raising=False)
+        prov = _build_provenance()
+        assert 'hostname' not in prov
+
+    def test_hostname_opt_in_when_enabled(self, monkeypatch):
+        monkeypatch.setenv('POROSITY_FE_INCLUDE_HOSTNAME', '1')
+        prov = _build_provenance()
+        assert 'hostname' in prov
+        # Either a non-empty string or None on hosts that refuse to report.
+        assert prov['hostname'] is None or isinstance(prov['hostname'], str)
+
+    def test_fe_export_include_raw_writes_npz_sidecar(self, tmp_path):
+        """include_raw=True emits a sibling .npz with the raw arrays."""
+        material = MATERIALS['T800_epoxy']
+        pf = PorosityField(material, 0.03, distribution='uniform')
+        mesh = CompositeMesh(pf, material, nx=3, ny=2, nz=2)
+        solver = FESolver(mesh, material, pf)
+        field_results = solver.solve(loading='compression',
+                                     applied_strain=-0.001)
+        json_path = str(tmp_path / "fe_raw.json")
+        FESolver.export_results(field_results, json_path, include_raw=True)
+        npz_path = json_path + '.npz'
+        assert os.path.exists(npz_path)
+        loaded = np.load(npz_path)
+        for key in ('displacement', 'stress_global', 'stress_local',
+                    'strain_global', 'strain_local'):
+            assert key in loaded.files
+        # Raw arrays should round-trip exactly.
+        np.testing.assert_array_equal(loaded['displacement'],
+                                      field_results.displacement)
+
+    def test_fe_export_default_no_npz(self, tmp_path):
+        """Default behavior must NOT bloat the output with a sidecar."""
+        material = MATERIALS['T800_epoxy']
+        pf = PorosityField(material, 0.03, distribution='uniform')
+        mesh = CompositeMesh(pf, material, nx=3, ny=2, nz=2)
+        solver = FESolver(mesh, material, pf)
+        field_results = solver.solve(loading='compression',
+                                     applied_strain=-0.001)
+        json_path = str(tmp_path / "fe_nosidecar.json")
+        FESolver.export_results(field_results, json_path)
+        assert not os.path.exists(json_path + '.npz')
+
+    def test_seed_threaded_through_compare_configurations(self):
+        """seed kwarg lands on every PorosityField the pipeline builds."""
+        results = compare_configurations(
+            0.03, seed=99,
+            configs={'uniform_spherical':
+                     POROSITY_CONFIGS['uniform_spherical']})
+        pf = results['uniform_spherical']['porosity_field']
+        assert pf.seed == 99
 
 
 # Tiny single-config dict keeps the argparse-driver tests fast (#58).
