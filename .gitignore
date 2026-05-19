@@ -27,5 +27,9 @@ Thumbs.db
 # Pytest
 .pytest_cache/
 
+# Sphinx build artefacts
+docs/_build/
+docs/api/
+
 # Claude worktrees and session metadata
 .claude/
