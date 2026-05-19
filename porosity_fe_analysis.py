@@ -258,7 +258,16 @@ class MaterialProperties:
         return self.t_ply * self.n_plies
 
     def get_compliance_matrix(self) -> np.ndarray:
-        """6x6 compliance matrix [S] for orthotropic material."""
+        """6x6 compliance matrix [S] for orthotropic material.
+
+        Notes
+        -----
+        Voigt order: ``[11, 22, 33, 23, 13, 12]`` (normals first, then shears in
+        the 23 / 13 / 12 order). The shear rows/columns assume **engineering**
+        strain (``gamma_ij = 2 * eps_ij``), i.e. ``S[5, 5] = 1 / G12`` maps a
+        single ``tau_12`` directly to ``gamma_12 = tau_12 / G12`` without a
+        factor of two. Stress is in MPa; strain is dimensionless.
+        """
         S = np.zeros((6, 6))
         S[0, 0] = 1.0 / self.E11
         S[1, 1] = 1.0 / self.E22
@@ -272,7 +281,16 @@ class MaterialProperties:
         return S
 
     def get_stiffness_matrix(self) -> np.ndarray:
-        """6x6 stiffness matrix [C] = [S]^-1."""
+        """6x6 stiffness matrix [C] = [S]^-1.
+
+        Notes
+        -----
+        Voigt order: ``[11, 22, 33, 23, 13, 12]`` (normals first, then shears in
+        the 23 / 13 / 12 order), matching :meth:`get_compliance_matrix`. Shear
+        components are **engineering** strain (``gamma_ij = 2 * eps_ij``), so
+        ``C[5, 5] = G12`` maps ``gamma_12`` directly to ``tau_12 = G12 *
+        gamma_12``. Stress is in MPa; strain is dimensionless.
+        """
         return np.linalg.inv(self.get_compliance_matrix())
 
     def get_isotropic_matrix_stiffness(self) -> np.ndarray:
@@ -1242,6 +1260,35 @@ class EmpiricalSolver:
         return kd
 
     def apply_loading(self, mode: str = 'compression', model: str = 'judd_wright'):
+        """Compute per-node knockdown for a given loading mode and model.
+
+        Populates ``self.nodal_knockdown`` (shape ``(n_nodes,)``, values in
+        ``(0, 1]``) by evaluating the empirical model at each node's local
+        ``Vp`` and folding in any discrete-void stress concentration factors.
+
+        Parameters
+        ----------
+        mode : {'compression', 'tension', 'shear', 'ilss', 'transverse_tension'}
+            Loading mode that selects the pristine strength and the
+            mode-specific empirical coefficient.
+        model : {'judd_wright', 'power_law', 'linear'}
+            Empirical knockdown form (see README "Empirical Strength
+            Knockdown").
+
+        Notes
+        -----
+        Sign convention: ``mode='compression'`` and ``mode='ilss'`` return a
+        **positive magnitude** failure stress (and a knockdown in ``(0, 1]``),
+        not a signed value. Tension and compression strengths are stored on
+        :class:`MaterialProperties` as positive numbers (``sigma_1c``,
+        ``sigma_1t``), and the downstream
+        ``failure_stress_MPa = KD * sigma_0`` is reported with the same
+        positive-magnitude sign. Distinguish modes by the ``mode`` field of
+        the returned dict, not by the sign of the stress. This is the
+        empirical-solver convention only — :class:`FieldResults` stores
+        **signed** FE stresses and strains in Voigt order
+        ``[11, 22, 33, 23, 13, 12]`` (engineering shear).
+        """
         _MODEL_FUNCS = {'judd_wright': self._judd_wright,
                         'power_law': self._power_law,
                         'linear': self._linear}
@@ -2660,6 +2707,16 @@ class Hex8Element:
 
         Strain ordering: [eps_11, eps_22, eps_33, gamma_23, gamma_13, gamma_12]
         DOF ordering: [u1x, u1y, u1z, u2x, u2y, u2z, ..., u8x, u8y, u8z]
+
+        Notes
+        -----
+        Voigt order: ``[11, 22, 33, 23, 13, 12]``. Shear rows produce
+        **engineering** strain (``gamma_ij = 2 * eps_ij = du_i/dx_j +
+        du_j/dx_i``), which is the convention paired with
+        :meth:`MaterialProperties.get_stiffness_matrix` so that ``sigma = C @
+        (B @ u)`` is dimensionally consistent. Apply the engineering-strain
+        transformation (:func:`strain_transformation_3d`) — not the tensor
+        form — when rotating ``B @ u`` between coordinate frames.
         """
         dN_dxi = self.shape_derivatives(xi, eta, zeta)
         J = dN_dxi @ self.node_coords
@@ -3258,6 +3315,19 @@ class FieldResults:
         that construct ``FieldResults`` directly); populated by
         ``FESolver.solve`` and consumed by the VTK export so failure
         hot-spots can be sliced in ParaView.
+
+    Notes
+    -----
+    Voigt order for both stress and strain: ``[11, 22, 33, 23, 13, 12]``
+    (normals first, then 23 / 13 / 12 shears). The last three strain
+    components are **engineering** strain (``gamma_ij = 2 * eps_ij``); the
+    last three stress components are the matching shear stresses
+    ``[tau_23, tau_13, tau_12]``. Sign convention: tensile normals are
+    positive, compressive normals are negative — these arrays are signed
+    (unlike the empirical ``failure_stress_MPa`` returned by
+    :meth:`EmpiricalSolver.apply_loading`, which is a positive magnitude).
+    Use :func:`strain_transformation_3d` / :func:`stress_transformation_3d`
+    to rotate these arrays between frames.
     """
     displacement: np.ndarray
     stress_global: np.ndarray
