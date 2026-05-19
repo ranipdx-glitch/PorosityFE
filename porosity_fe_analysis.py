@@ -179,7 +179,101 @@ def _json_default(o):
 
 @dataclass
 class MaterialProperties:
-    """Composite material properties with constituent data for micromechanics."""
+    """Composite material properties with constituent data for micromechanics.
+
+    Bundles the lamina-level orthotropic stiffness, the longitudinal /
+    transverse / shear strength allowables (used by the Tsai-Wu failure
+    criterion in :class:`Hex8Element`), the ply / laminate geometry and the
+    constituent (matrix + fiber) data needed by the Mori-Tanaka
+    homogenization for porosity degradation. All stress / modulus inputs are
+    in **MPa** and all lengths are in **mm**; Poisson ratios and the fiber
+    volume fraction are dimensionless fractions.
+
+    The dataclass is validated by :meth:`__post_init__`: stiffness moduli
+    and strengths must be positive finite floats; Poisson ratios must lie
+    in ``(-1, 0.5)``; ``n_plies`` must be a positive integer; and
+    ``fiber_volume_fraction`` must be a fraction in ``(0, 1)`` (a percent
+    such as ``60`` is rejected with a hint).
+
+    Parameters
+    ----------
+    E11, E22, E33 : float
+        Lamina orthotropic Young's moduli along the fiber (1), transverse
+        (2) and through-thickness (3) directions, in MPa.
+    G12, G13, G23 : float
+        Lamina shear moduli (in-plane, interlaminar and transverse shear),
+        in MPa.
+    nu12, nu13, nu23 : float
+        Major (12), through-thickness (13) and transverse (23) Poisson's
+        ratios. Each must lie in ``(-1, 0.5)``.
+    sigma_1c, sigma_1t : float
+        Longitudinal compression and tension allowables, in MPa.
+    sigma_2t, sigma_2c : float
+        Transverse tension and compression allowables, in MPa.
+    tau_12 : float
+        In-plane shear allowable, in MPa.
+    tau_ilss : float
+        Interlaminar (short-beam) shear allowable, in MPa.
+    t_ply : float
+        Ply thickness, in mm.
+    n_plies : int
+        Number of plies in the laminate (positive integer).
+    matrix_modulus : float
+        Matrix (resin) Young's modulus ``E_m``, in MPa, used by the
+        Mori-Tanaka homogenization in :class:`Hex8Element`.
+    matrix_poisson : float
+        Matrix Poisson's ratio ``nu_m`` (dimensionless, in
+        ``(-1, 0.5)``).
+    fiber_modulus : float
+        Fiber longitudinal Young's modulus ``E_f``, in MPa.
+    fiber_volume_fraction : float
+        Pristine fiber volume fraction ``V_f``, as a fraction in
+        ``(0, 1)`` (e.g. ``0.60`` for a 60 % fiber laminate).
+
+    Attributes
+    ----------
+    E11, E22, E33 : float
+        Orthotropic Young's moduli (MPa).
+    G12, G13, G23 : float
+        Shear moduli (MPa).
+    nu12, nu13, nu23 : float
+        Poisson's ratios (dimensionless).
+    sigma_1c, sigma_1t, sigma_2t, sigma_2c : float
+        Normal-direction strengths (MPa).
+    tau_12, tau_ilss : float
+        Shear strengths (MPa).
+    t_ply : float
+        Ply thickness (mm).
+    n_plies : int
+        Number of plies.
+    matrix_modulus, matrix_poisson : float
+        Constituent matrix elasticity (MPa, dimensionless).
+    fiber_modulus, fiber_volume_fraction : float
+        Constituent fiber modulus (MPa) and pristine fiber volume
+        fraction (dimensionless, in ``(0, 1)``).
+    total_thickness : float
+        Read-only property: ``t_ply * n_plies`` (mm). Used as ``L_z`` by
+        :class:`CompositeMesh`.
+
+    Examples
+    --------
+    Build a T800/epoxy ply (the same values are pre-baked in
+    :data:`MATERIALS`):
+
+    >>> mat = MaterialProperties(
+    ...     E11=161000.0, E22=11380.0, E33=11380.0,
+    ...     G12=5170.0, G13=5170.0, G23=3980.0,
+    ...     nu12=0.32, nu13=0.32, nu23=0.40,
+    ...     sigma_1c=1500.0, sigma_1t=2800.0,
+    ...     sigma_2t=80.0, sigma_2c=250.0,
+    ...     tau_12=100.0, tau_ilss=90.0,
+    ...     t_ply=0.183, n_plies=24,
+    ...     matrix_modulus=3500.0, matrix_poisson=0.35,
+    ...     fiber_modulus=294000.0, fiber_volume_fraction=0.60,
+    ... )
+    >>> round(mat.total_thickness, 4)
+    4.392
+    """
     # Lamina-level orthotropic properties
     E11: float          # Longitudinal modulus (MPa)
     E22: float          # Transverse modulus (MPa)
@@ -497,7 +591,70 @@ VOID_SHAPES = {
 
 
 class VoidGeometry:
-    """Single void parameterization — equivalent of WrinkleGeometry."""
+    """Single discrete void parameterized as an oriented ellipsoid.
+
+    A void is the locus of points satisfying
+
+    .. math::
+
+        \\left(\\frac{x_\\ell}{a}\\right)^2
+        + \\left(\\frac{y_\\ell}{b}\\right)^2
+        + \\left(\\frac{z_\\ell}{c}\\right)^2 \\le 1,
+
+    where ``(x_l, y_l, z_l)`` are coordinates in the **void-local** frame:
+    coordinates are first translated so the void centroid is at the origin
+    and then rotated by ``-orientation`` about the global +z axis. The
+    semi-axes ``(a, b, c)`` correspond to the world x / y / z directions
+    in that local frame. This class is the porosity-model counterpart of
+    ``WrinkleGeometry`` in the WrinkleFE codebase.
+
+    Parameters
+    ----------
+    center : tuple of 3 float
+        Centroid coordinates ``(x, y, z)`` in the global frame, in mm.
+        Must be finite.
+    radii : tuple of 3 float
+        Semi-axes ``(a, b, c)`` of the ellipsoid in mm, ordered along the
+        **local** x / y / z axes. All three must be positive and finite
+        (they appear as ``1 / r`` in the containment test).
+    orientation : float, optional
+        Rotation about the global +z axis, in **radians** (default 0).
+        Positive values rotate the local x-axis toward the global y-axis.
+
+    Attributes
+    ----------
+    center : np.ndarray
+        Shape ``(3,)`` float array; the void centroid in mm.
+    radii : np.ndarray
+        Shape ``(3,)`` float array of positive semi-axes ``(a, b, c)``
+        in mm.
+    orientation : float
+        In-plane rotation angle in radians.
+    aspect_ratio : float
+        Read-only property: ``max(radii) / min(radii)``, used to pick a
+        spherical / cylindrical / penny SCF regime in
+        :meth:`stress_concentration_factor`.
+
+    Examples
+    --------
+    A 1 mm-radius spherical void at the coupon midpoint:
+
+    >>> v = VoidGeometry(center=(25.0, 10.0, 2.2),
+    ...                  radii=(1.0, 1.0, 1.0))
+    >>> bool(v.contains(25.0, 10.0, 2.2))
+    True
+    >>> round(v.volume(), 4)
+    4.1888
+
+    A penny-shaped void rotated 30 deg about z:
+
+    >>> import math
+    >>> v = VoidGeometry(center=(25.0, 10.0, 2.2),
+    ...                  radii=(3.0, 3.0, 0.3),
+    ...                  orientation=math.radians(30.0))
+    >>> round(v.aspect_ratio, 2)
+    10.0
+    """
 
     def __init__(self, center: Tuple, radii: Tuple, orientation: float = 0.0):
         self.center = np.array(center, dtype=float)
@@ -623,7 +780,94 @@ POROSITY_CONFIGS = {
 
 
 class PorosityField:
-    """Distributed + discrete porosity field."""
+    """Continuous through-thickness porosity profile plus discrete voids.
+
+    A ``PorosityField`` produces a scalar void volume fraction
+    ``Vp(x, y, z) in [0, 1]`` at any point inside the laminate by
+    superposing a smooth distributed component (one of three closed-form
+    through-thickness profiles) with an optional list of explicit
+    :class:`VoidGeometry` ellipsoids. The distributed profile is
+    renormalized so its mean over ``z in [0, Lz]`` equals ``Vp``. This is
+    the porosity input consumed by :class:`CompositeMesh` (sampled at
+    every node) and by :class:`Hex8Element` (the Mori-Tanaka stiffness
+    degradation reads the per-node values from here).
+
+    Parameters
+    ----------
+    material : MaterialProperties
+        Composite material — supplies ``t_ply`` and ``n_plies`` (and
+        hence ``Lz = t_ply * n_plies``) used by the through-thickness
+        profile.
+    void_volume_fraction : float
+        Mean void volume fraction ``Vp`` over the laminate, as a
+        fraction in ``[0, 1]`` (e.g. ``0.02`` for 2 %). Passing a percent
+        such as ``2.0`` raises ``ValueError`` with a unit hint.
+    distribution : {'uniform', 'clustered', 'interface'}, optional
+        Through-thickness profile shape (default ``'uniform'``).
+
+        - ``'uniform'`` — constant ``Vp`` at every ``z``.
+        - ``'clustered'`` — Gaussian bump centered at
+          ``Lz * _CLUSTER_OFFSETS[cluster_location]`` with
+          ``sigma = Lz / 6``.
+        - ``'interface'`` — sum of Gaussians at each ply interface
+          ``z = k * t_ply`` with ``sigma = 0.35 * t_ply``.
+    void_shape : str or tuple of 3 float, optional
+        Either a key of :data:`VOID_SHAPES`
+        (``'spherical'``, ``'cylindrical'`` or ``'penny'``) or an
+        explicit ``(a1, a2, a3)`` shape-radii tuple. Used as the Eshelby
+        inclusion shape for the Mori-Tanaka homogenization in
+        :class:`Hex8Element`. Default ``'spherical'``.
+    cluster_location : {'midplane', 'surface', 'quarter'}, optional
+        Location of the Gaussian bump for ``distribution='clustered'``,
+        expressed as a fraction of ``Lz``. ``'midplane'`` -> ``0.5``,
+        ``'surface'`` -> ``0.0``, ``'quarter'`` -> ``0.25``. Ignored for
+        the other distributions. Default ``'midplane'``.
+    discrete_voids : list of VoidGeometry, optional
+        Explicit ellipsoidal voids superposed on the smooth profile
+        (their contribution is taken via ``max``, then clipped at 1.0).
+    seed : int, optional
+        Recorded into provenance for a future stochastic placement mode
+        (#55). The current pipeline is RNG-free, so this argument has no
+        effect on the produced field.
+
+    Attributes
+    ----------
+    material : MaterialProperties
+        Stored reference to the input material.
+    Vp : float
+        Mean void volume fraction (after the snap-to-1.0 tolerance).
+    distribution : str
+        One of the three names listed above.
+    cluster_location : str
+        One of ``'midplane'``, ``'surface'``, ``'quarter'``.
+    void_shape_radii : tuple of 3 float
+        Resolved Eshelby ``(a1, a2, a3)`` shape radii.
+    discrete_voids : list of VoidGeometry
+        Discrete inclusions (empty list if none were supplied).
+    Lz : float
+        Total laminate thickness (mm), copied from
+        ``material.total_thickness``.
+    seed : int or None
+        The seed argument, kept for provenance.
+
+    Examples
+    --------
+    A 2 % uniformly-distributed spherical porosity field:
+
+    >>> mat = MATERIALS['T800_epoxy']
+    >>> field = PorosityField(mat, void_volume_fraction=0.02,
+    ...                       distribution='uniform',
+    ...                       void_shape='spherical')
+    >>> bool(0.0 < field.Vp <= 1.0)
+    True
+
+    A midplane-clustered field with penny-shaped voids:
+
+    >>> field = PorosityField(mat, void_volume_fraction=0.03,
+    ...                       distribution='clustered',
+    ...                       cluster_location='midplane',
+    ...                       void_shape='penny')
+    """
 
     _CLUSTER_OFFSETS = {'midplane': 0.5, 'surface': 0.0, 'quarter': 0.25}
     _DISTRIBUTIONS = ('uniform', 'clustered', 'interface')
@@ -769,7 +1013,93 @@ class PorosityField:
 # ============================================================
 
 class CompositeMesh:
-    """3D structured hex mesh with porosity."""
+    """3D structured hexahedral mesh of a composite coupon with porosity.
+
+    Builds a regular grid of 8-node hexahedral elements over a
+    rectangular coupon of dimensions ``L_x x L_y x L_z``, samples the
+    porosity field at every node, assigns a ply id (and optional ply
+    angle in degrees) to each element from its centroid z, and flags
+    elements whose centroid falls inside any explicit
+    :class:`VoidGeometry` for the explicit-inclusion solver path.
+
+    The in-plane coupon size is **hard-coded** to ``L_x = 50.0`` mm and
+    ``L_y = 20.0`` mm (a standard ASTM-style coupon). Through-thickness
+    ``L_z`` is taken from ``material.total_thickness``
+    (``t_ply * n_plies``). To analyze a different coupon size, set
+    ``self.L_x`` / ``self.L_y`` on the instance and call
+    :meth:`generate_mesh` again.
+
+    Parameters
+    ----------
+    porosity_field : PorosityField
+        Source of nodal porosity values. Sampled by
+        :meth:`generate_mesh` at every node coordinate.
+    material : MaterialProperties
+        Composite material; supplies ``total_thickness`` (``L_z``) and
+        ``n_plies`` for the per-element ply id assignment.
+    nx, ny, nz : int, optional
+        Number of elements along each axis (defaults
+        ``nx=50``, ``ny=20``, ``nz=24``). Each must be a positive
+        integer not greater than ``_MAX_ELEMENTS_PER_AXIS`` (10 000).
+    ply_angles : list of float, optional
+        Per-ply orientation in degrees. If shorter than ``n_plies``
+        the list is tiled. ``None`` (default) means all 0 deg plies.
+
+    Attributes
+    ----------
+    porosity_field : PorosityField
+        Stored input.
+    material : MaterialProperties
+        Stored input.
+    nx, ny, nz : int
+        Element counts along each axis.
+    L_x, L_y, L_z : float
+        Coupon dimensions in mm. ``L_x = 50.0`` and ``L_y = 20.0`` are
+        defaults; ``L_z = material.total_thickness``.
+    nodes : np.ndarray
+        Shape ``(n_nodes, 3)`` float array of node coordinates (mm),
+        populated by :meth:`generate_mesh`.
+    elements : np.ndarray
+        Shape ``(n_elem, 8)`` int array of node indices per element
+        (VTK hexahedron ordering).
+    porosity : np.ndarray
+        Shape ``(n_nodes,)`` nodal porosity values in ``[0, 1]``.
+    stiffness_reduction : np.ndarray
+        Shape ``(n_nodes,)`` complementary ``1 - Vp`` field.
+    ply_ids : np.ndarray
+        Shape ``(n_nodes,)`` per-node ply id (``0`` to ``n_plies - 1``).
+    elem_ply_ids : np.ndarray
+        Shape ``(n_elem,)`` per-element ply id from the centroid z.
+    ply_angles : np.ndarray
+        Shape ``(n_elem,)`` per-element ply orientation in degrees.
+    void_elements : np.ndarray
+        Int indices of elements whose centroid lies inside any discrete
+        void.
+    void_element_set : set of int
+        Same content as ``void_elements`` for O(1) membership tests.
+    n_nodes, n_elements, n_dof : int
+        Read-only sizes.
+
+    Examples
+    --------
+    A default-size coupon with the T800 ply and 2 % uniform porosity:
+
+    >>> mat = MATERIALS['T800_epoxy']
+    >>> field = PorosityField(mat, void_volume_fraction=0.02,
+    ...                       distribution='uniform')
+    >>> mesh = CompositeMesh(field, mat, nx=10, ny=4, nz=4)
+    >>> mesh.L_x, mesh.L_y
+    (50.0, 20.0)
+    >>> mesh.n_elements
+    160
+
+    Override the in-plane coupon size to 80 mm x 25 mm:
+
+    >>> mesh = CompositeMesh(field, mat, nx=8, ny=4, nz=4)
+    >>> mesh.L_x = 80.0
+    >>> mesh.L_y = 25.0
+    >>> mesh.generate_mesh()
+    """
 
     # Cap mesh dimensions to prevent accidental memory blowup. A million-element
     # mesh is already ~100x what the GUI spinboxes allow; an order of magnitude
@@ -3148,7 +3478,7 @@ class Hex8Element:
     def stiffness_matrix(self) -> np.ndarray:
         """Element stiffness matrix (24x24) via 2x2x2 Gauss quadrature.
 
-        Ke = sum over GPs of: B^T @ C_bar @ B * |J| * w
+        ``Ke = sum over GPs of: B^T @ C_bar @ B * det(J) * w``
 
         Raises
         ------
@@ -3693,9 +4023,9 @@ class BoundaryHandler:
                       ) -> Tuple[scipy.sparse.csc_matrix, np.ndarray]:
         """Apply penalty method for prescribed displacements.
 
-        For each constrained DOF i with value v:
-            K[i,i] += alpha, F[i] = alpha * v
-        where alpha = penalty_factor * max(diag(K)).
+        For each constrained DOF ``i`` with value ``v``,
+        ``K[i, i] += alpha`` and ``F[i] = alpha * v``, where
+        ``alpha = penalty_factor * max(diag(K))``.
 
         Parameters
         ----------

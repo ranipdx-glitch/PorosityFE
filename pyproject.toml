@@ -45,12 +45,26 @@ dependencies = [
 [project.optional-dependencies]
 web = ["streamlit>=1.32"]
 dev = ["pytest>=7.0.0", "ruff>=0.5", "mypy>=1.8"]
-all = ["streamlit>=1.32", "pytest>=7.0.0", "ruff>=0.5", "mypy>=1.8"]
+docs = [
+    "sphinx>=7.0",
+    "sphinx-rtd-theme>=2.0",
+    "myst-parser>=2.0",
+]
+all = [
+    "streamlit>=1.32",
+    "pytest>=7.0.0",
+    "ruff>=0.5",
+    "mypy>=1.8",
+    "sphinx>=7.0",
+    "sphinx-rtd-theme>=2.0",
+    "myst-parser>=2.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/elhajjar1/PorosityFE"
 Repository = "https://github.com/elhajjar1/PorosityFE"
 Issues = "https://github.com/elhajjar1/PorosityFE/issues"
+Documentation = "https://ranipdx-glitch.github.io/PorosityFE/"
 
 [project.scripts]
 validate_porosity = "validate_porosity_cli:main"
