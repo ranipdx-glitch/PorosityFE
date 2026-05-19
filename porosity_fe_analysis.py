@@ -912,6 +912,67 @@ class CompositeMesh:
         else:
             raise ValueError(f"Unknown face '{face}'. Use x_min/x_max/y_min/y_max/z_min/z_max.")
 
+    def find_nodes_near(self, x: Optional[float] = None,
+                        y: Optional[float] = None,
+                        z: Optional[float] = None,
+                        tol: Optional[float] = None) -> np.ndarray:
+        """Return node indices within ``tol`` of the specified target coords.
+
+        Any of ``x``, ``y``, ``z`` may be ``None``, in which case that axis
+        is not used in the distance computation (i.e. the search becomes a
+        line/plane match rather than a point match). Distances are computed
+        with ``np.linalg.norm`` on the subset of axes that were specified.
+
+        Parameters
+        ----------
+        x, y, z : float or None
+            Target coordinate per axis. Pass ``None`` to ignore an axis.
+        tol : float or None
+            Distance tolerance. If ``None``, defaults to half of a typical
+            element edge length (``0.5 * min(L_x/nx, L_y/ny, L_z/nz)``).
+
+        Returns
+        -------
+        np.ndarray
+            Sorted 1-D array of node indices whose distance to the target
+            (restricted to the specified axes) is ``<= tol``.
+
+        Notes
+        -----
+        Used by ILSS short-beam BCs to locate midspan-top loading nodes
+        even when ``Lx / 2`` does not coincide with a mesh node.
+        """
+        if x is None and y is None and z is None:
+            raise ValueError(
+                "find_nodes_near: at least one of x/y/z must be specified."
+            )
+        if tol is None:
+            dxs = []
+            if self.nx > 0:
+                dxs.append(self.L_x / self.nx)
+            if self.ny > 0:
+                dxs.append(self.L_y / self.ny)
+            if self.nz > 0:
+                dxs.append(self.L_z / self.nz)
+            tol = 0.5 * min(dxs)
+
+        coords = self.nodes
+        targets = []
+        cols = []
+        if x is not None:
+            targets.append(float(x))
+            cols.append(0)
+        if y is not None:
+            targets.append(float(y))
+            cols.append(1)
+        if z is not None:
+            targets.append(float(z))
+            cols.append(2)
+
+        diffs = coords[:, cols] - np.asarray(targets, dtype=float)
+        dist = np.linalg.norm(diffs, axis=1)
+        return np.where(dist <= tol)[0]
+
     def __repr__(self) -> str:
         return (f"CompositeMesh(nx={self.nx}, ny={self.ny}, nz={self.nz}, "
                 f"n_nodes={self.n_nodes}, n_elements={self.n_elements}, "
@@ -3182,6 +3243,91 @@ class BoundaryHandler:
         F = np.zeros(n_dof, dtype=np.float64)
         return constrained, F
 
+    def ilss_bcs(self, applied_load: float = -10.0
+                 ) -> Tuple[Dict[int, float], np.ndarray]:
+        """ILSS (interlaminar short-beam shear) boundary conditions, ASTM D2344.
+
+        Three-point short-beam-shear setup:
+
+        - Two simple supports at the bottom face (``z_min``), one along the
+          ``x_min`` edge and one along the ``x_max`` edge. All three
+          translational DOFs are pinned at the support nodes so the beam
+          is fully simply-supported in the FE sense.
+        - A downward (``-z``) midspan load applied as a nodal force on
+          the top face (``z_max``) at ``x = L_x / 2``. The total load is
+          ``applied_load`` (typically negative for "downward"); it is
+          distributed equally across the midspan-top nodes.
+
+        Unlike the compression/tension/shear BCs which are *displacement*
+        controlled, ILSS is **force controlled** — the returned ``F``
+        vector carries the load directly rather than being routed through
+        ``apply_penalty``. The penalty path is still used for the support
+        DOF constraints.
+
+        Parameters
+        ----------
+        applied_load : float
+            Total midspan load in the ``z`` direction (negative = downward).
+
+        Returns
+        -------
+        constrained_dofs : dict
+            ``{global_dof: prescribed_value}`` — all-zero values at the
+            two support edges (left/right of the bottom face).
+        F : np.ndarray
+            Shape ``(n_dof,)`` force vector with the midspan load applied
+            to the top-face nodes near ``x = Lx/2``.
+
+        Notes
+        -----
+        This implementation assumes the **three-point bend** geometry of
+        ASTM D2344. The standard four-point bend variant (ASTM D7264)
+        requires a different BC method — either a new ``ilss_4pt_bcs``
+        with two upper load rollers, or the empirical-only path. The
+        Tsai-Wu / strength-recovery code already handles the multi-axial
+        stress state recovered from this solve.
+        """
+        n_dof = self.mesh.n_dof
+        Lx = self.mesh.L_x
+        Lz = self.mesh.L_z
+
+        zmin = self.mesh.nodes_on_face('z_min')
+        xmin = self.mesh.nodes_on_face('x_min')
+        xmax = self.mesh.nodes_on_face('x_max')
+
+        support_left = np.intersect1d(zmin, xmin)
+        support_right = np.intersect1d(zmin, xmax)
+
+        if support_left.size == 0 or support_right.size == 0:
+            raise RuntimeError(
+                "ilss_bcs: failed to locate bottom-face support edges "
+                "(intersection of z_min with x_min / x_max is empty). "
+                "Check mesh generation."
+            )
+
+        constrained: Dict[int, float] = {}
+        for nid in np.concatenate([support_left, support_right]):
+            nid = int(nid)
+            constrained[3 * nid]     = 0.0  # ux
+            constrained[3 * nid + 1] = 0.0  # uy
+            constrained[3 * nid + 2] = 0.0  # uz
+
+        F = np.zeros(n_dof, dtype=np.float64)
+        # Tolerance must be wide enough to bracket *some* x-column when the
+        # exact midspan does not fall on a mesh node. Use half the x-edge
+        # plus a small fp epsilon so odd nx values still resolve a column.
+        dx = Lx / max(self.mesh.nx, 1)
+        dz = Lz / max(self.mesh.nz, 1)
+        tol = 0.5 * np.hypot(dx, dz) + 1e-9
+        midspan_top = self.mesh.find_nodes_near(x=Lx / 2.0, z=Lz, tol=tol)
+        if midspan_top.size == 0:
+            raise RuntimeError(
+                "ilss_bcs: no top-face nodes found near midspan "
+                f"(x = {Lx / 2.0}, z = {Lz}). Refine the mesh."
+            )
+        F[3 * midspan_top + 2] = applied_load / float(midspan_top.size)
+        return constrained, F
+
     @staticmethod
     def apply_penalty(K: scipy.sparse.csc_matrix, F: np.ndarray,
                       constrained_dofs: Dict[int, float],
@@ -3473,15 +3619,22 @@ class FESolver:
 
     def solve(self, loading: str = 'compression',
               applied_strain: float = -0.01,
+              applied_load: float = -10.0,
               verbose: bool = False) -> FieldResults:
         """Solve the static FE problem.
 
         Parameters
         ----------
         loading : str
-            'compression', 'tension', or 'shear'.
+            'compression', 'tension', 'shear', or 'ilss'.
         applied_strain : float
-            Applied nominal strain (negative for compression).
+            Applied nominal strain (negative for compression). Used by the
+            displacement-controlled modes ('compression', 'tension',
+            'shear').
+        applied_load : float
+            Total midspan load (force) used by the force-controlled ILSS
+            short-beam-shear mode (ASTM D2344). Ignored for the other
+            modes.
         verbose : bool
             Print progress information.
 
@@ -3512,8 +3665,13 @@ class FESolver:
             constrained, F = self.bc_handler.tension_bcs(applied_strain)
         elif loading == 'shear':
             constrained, F = self.bc_handler.shear_bcs(applied_strain)
+        elif loading == 'ilss':
+            constrained, F = self.bc_handler.ilss_bcs(applied_load)
         else:
-            raise ValueError(f"Unknown loading '{loading}'. Use compression/tension/shear.")
+            raise ValueError(
+                f"Unknown loading '{loading}'. "
+                "Use compression/tension/shear/ilss."
+            )
 
         if verbose:
             logger.info("  Applied %d displacement BCs", len(constrained))
@@ -3595,13 +3753,21 @@ class FESolver:
         # 7. Compute knockdown as average-stress ratio (porous / pristine)
         # Both numerator and denominator use the same 3D FE framework so that
         # dimensional/mesh effects cancel.  For each element we compute what
-        # sigma_xx *would* be with pristine stiffness at the same strain, then
-        # average.  This avoids the CLT-vs-3D mismatch that caused knockdown>1.
+        # the dominant stress component *would* be with pristine stiffness
+        # at the same strain, then average. This avoids the CLT-vs-3D
+        # mismatch that caused knockdown > 1.
+        #
+        # For ILSS short-beam shear the dominant component is tau_xz
+        # (Voigt index 4); for the other modes it is sigma_xx (index 0).
+        if loading == 'ilss':
+            comp_idx = 4
+        else:
+            comp_idx = 0
 
-        avg_sigma_xx = np.mean(stress_global[:, :, 0])
+        avg_sigma = np.mean(stress_global[:, :, comp_idx])
 
-        # Pristine reference: compute sigma_xx = C_pristine_rot[0,:] @ eps
-        # at each element/GP using the same strain field but pristine stiffness.
+        # Pristine reference: compute the same Voigt component using the
+        # rotated pristine stiffness applied to the recovered strain field.
         C_base = self.material.get_stiffness_matrix()
         pristine_sigma_sum = 0.0
         pristine_count = 0
@@ -3613,14 +3779,14 @@ class FESolver:
                 C_prist_rot = C_base
             for g in range(n_gp):
                 eps = strain_global[e, g]
-                pristine_sig_xx = float(C_prist_rot[0, :] @ eps)
-                pristine_sigma_sum += pristine_sig_xx
+                pristine_sig = float(C_prist_rot[comp_idx, :] @ eps)
+                pristine_sigma_sum += pristine_sig
                 pristine_count += 1
 
         pristine_avg = pristine_sigma_sum / pristine_count if pristine_count > 0 else 1.0
 
         if abs(pristine_avg) > 1e-12:
-            knockdown = abs(avg_sigma_xx) / abs(pristine_avg)
+            knockdown = abs(avg_sigma) / abs(pristine_avg)
         else:
             knockdown = 1.0
         knockdown = min(knockdown, 1.0)

@@ -727,19 +727,21 @@ def run_analysis(cfg: dict) -> dict:
     empirical = EmpiricalSolver(mesh, material, ply_angles=cfg["angles"])
     emp_results = empirical.get_all_failure_loads()
 
-    # FESolver BCs don't support ILSS short-beam shear today; skip the FE
-    # pass entirely for ILSS so we don't silently substitute compression.
+    # All four loading modes now have FE BC support, including ILSS
+    # short-beam shear (ASTM D2344, 3-point bend, force-controlled).
     loading_mode = cfg["loading_mode"]
-    fe_supported = loading_mode in ("compression", "tension", "shear")
-
-    fe_field = None
-    fe_loading = None
-    if fe_supported:
-        applied_strain = -0.01 if loading_mode == "compression" else 0.01
-        fe_loading = loading_mode
-        fe_solver = FESolver(
-            mesh, material, porosity_field, ply_angles=cfg["angles"],
+    fe_loading = loading_mode
+    fe_solver = FESolver(
+        mesh, material, porosity_field, ply_angles=cfg["angles"],
+    )
+    if loading_mode == "ilss":
+        # Force-controlled short-beam shear. Default 10 N midspan load is
+        # arbitrary — knockdown and field shapes are scale-invariant.
+        fe_field = fe_solver.solve(
+            loading="ilss", applied_load=-10.0, verbose=False,
         )
+    else:
+        applied_strain = -0.01 if loading_mode == "compression" else 0.01
         fe_field = fe_solver.solve(
             loading=fe_loading, applied_strain=applied_strain, verbose=False,
         )
@@ -752,10 +754,7 @@ def run_analysis(cfg: dict) -> dict:
         "empirical": emp_results,
         "fe_field": fe_field,
         "fe_loading": fe_loading,
-        "fe_skipped_reason": (
-            None if fe_supported
-            else f"FE solver does not support '{loading_mode}' boundary conditions"
-        ),
+        "fe_skipped_reason": None,
         "f_md": empirical.f_md,
     }
 
@@ -1097,7 +1096,7 @@ def _render():
             help=(
                 "All four modes are computed empirically; this selects the "
                 "primary mode for the FE solve and bar-chart highlight. "
-                "ILSS skips the FE pass (BCs not supported)."
+                "ILSS uses 3-point short-beam-shear BCs (ASTM D2344)."
             ),
         )
 
@@ -1166,7 +1165,7 @@ def _render():
             - **Profile** — through-thickness porosity distribution
             - **Mesh** — mid-y cross-section of the FE mesh, coloured by stiffness retention
             - **Results** — empirical knockdown bar chart with the FE stiffness knockdown overlaid
-            - **Stress** — FE stress contour for a chosen component (skipped for ILSS)
+            - **Stress** — FE stress contour for a chosen component
             - **Export** — download the empirical knockdown sweep as JSON or
               CSV, or generate an NCR validation summary (PDF / Markdown /
               JSON) with a recommended MRB disposition path
