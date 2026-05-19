@@ -4077,6 +4077,11 @@ def _build_arg_parser() -> 'argparse.ArgumentParser':
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    parser.add_argument(
         "--material",
         default="T800_epoxy",
         help="Material preset name (validated against the built-in presets).",

@@ -2901,6 +2901,15 @@ class TestCLIMain:
         assert exc.value.code == 0
         assert 'porosity-analyze' in capsys.readouterr().out
 
+    def test_version_flag(self, capsys):
+        """--version prints '<prog> <__version__>' and exits 0 (issue #80)."""
+        with pytest.raises(SystemExit) as exc:
+            porosity_fe_analysis.main(['--version'])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert 'porosity-analyze' in out
+        assert porosity_fe_analysis.__version__ in out
+
     def test_list_materials(self, capsys):
         assert porosity_fe_analysis.main(['--list-materials']) == 0
         out = capsys.readouterr().out
