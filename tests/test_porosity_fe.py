@@ -2892,6 +2892,102 @@ _TINY_CONFIGS = {'uniform_spherical': {'distribution': 'uniform',
                                        'void_shape': 'spherical'}}
 
 
+def _extract_knockdowns(results: dict) -> dict:
+    """Flatten the per-config knockdown numbers for equality checks.
+
+    Picks the numerical scalars the parallel/serial paths must agree on,
+    skipping the embedded ``mesh`` / ``porosity_field`` / ``empirical_solver``
+    objects (those are different instances per call by construction).
+    """
+    flat = {}
+    for name, r in results.items():
+        emp = r['empirical']
+        for mode in ('compression', 'tension', 'shear', 'ilss'):
+            for model in ('judd_wright', 'power_law', 'linear'):
+                key = (name, mode, model)
+                flat[key] = emp[mode][model]['knockdown']
+    return flat
+
+
+class TestParallelSweep:
+    """Parallel ``compare_configurations`` path (#52)."""
+
+    def test_parallel_matches_serial(self):
+        """n_jobs>1 must produce numerically identical results to n_jobs=1.
+
+        The pipeline is deterministic linear algebra (no RNG), so the
+        parallel path is expected to be bit-identical, not merely close.
+        We assert ``assert_allclose`` with a tight tolerance to allow for
+        BLAS reorder noise on multi-threaded platforms.
+        """
+        configs = {
+            'uniform_spherical': POROSITY_CONFIGS['uniform_spherical'],
+            'clustered_midplane': POROSITY_CONFIGS['clustered_midplane'],
+        }
+        serial = compare_configurations(
+            0.03, configs=configs, n_jobs=1)
+        parallel = compare_configurations(
+            0.03, configs=configs, n_jobs=2)
+
+        # Same config-name set, in the same order (deterministic assembly).
+        assert list(serial.keys()) == list(parallel.keys())
+
+        s_flat = _extract_knockdowns(serial)
+        p_flat = _extract_knockdowns(parallel)
+        assert set(s_flat) == set(p_flat)
+        for k in s_flat:
+            np.testing.assert_allclose(
+                p_flat[k], s_flat[k], rtol=1e-10, atol=0.0,
+                err_msg=f"Knockdown drift between serial and parallel for {k}")
+
+    def test_resolve_n_jobs_normalises_zero_and_negative(self):
+        """0/-1/None all mean "use all cores"."""
+        from porosity_fe_analysis import _resolve_n_jobs
+        cores = os.cpu_count() or 1
+        assert _resolve_n_jobs(None) == cores
+        assert _resolve_n_jobs(0) == cores
+        assert _resolve_n_jobs(-1) == cores
+        assert _resolve_n_jobs(1) == 1
+        assert _resolve_n_jobs(4) == 4
+
+    def test_analyze_one_returns_picklable_dict(self):
+        """The (Vp, name) -> result tuple must round-trip through pickle.
+
+        Guards the ProcessPoolExecutor contract: if a future refactor
+        adds an un-picklable member (lambda, open file handle) the
+        parallel path silently degrades to a cryptic worker error. This
+        test catches it at the helper level.
+        """
+        import pickle
+        from porosity_fe_analysis import _analyze_one
+        Vp, name, result = _analyze_one(
+            0.02, 'uniform_spherical',
+            POROSITY_CONFIGS['uniform_spherical'],
+            'T800_epoxy', -1500.0, None)
+        assert Vp == 0.02
+        assert name == 'uniform_spherical'
+        # Round-trip the whole result dict (mesh + porosity_field +
+        # empirical_solver + emp_results all included).
+        round_tripped = pickle.loads(pickle.dumps(result))
+        assert (round_tripped['empirical']['compression']['judd_wright']
+                ['knockdown']
+                == result['empirical']['compression']['judd_wright']
+                ['knockdown'])
+
+    def test_single_config_does_not_spawn_pool(self):
+        """One task should run inline even when n_jobs>1 to avoid
+        ProcessPoolExecutor's fork overhead. We can't observe the pool
+        directly without monkeypatching, but we can assert the result
+        matches the serial path."""
+        configs = {'uniform_spherical': POROSITY_CONFIGS['uniform_spherical']}
+        serial = compare_configurations(0.03, configs=configs, n_jobs=1)
+        also_serial = compare_configurations(0.03, configs=configs, n_jobs=4)
+        s_flat = _extract_knockdowns(serial)
+        p_flat = _extract_knockdowns(also_serial)
+        for k in s_flat:
+            assert p_flat[k] == s_flat[k]
+
+
 class TestCLIMain:
     """Argparse-driven entry point (issue #58)."""
 
@@ -3013,6 +3109,54 @@ class TestCLIMain:
                 '--quiet', '--verbose',
             ])
         assert exc.value.code == 2
+
+    def test_jobs_cli_flag_passed_through(self, tmp_path, monkeypatch):
+        """``--jobs N`` from the CLI must thread into compare_configurations
+        as ``n_jobs=N`` (#52). We monkeypatch the function with a recording
+        shim instead of spinning up real workers — the actual parallel
+        sweep is exercised by ``TestParallelSweep`` above."""
+        seen = {}
+        original = porosity_fe_analysis.compare_configurations
+
+        def _spy(*args, **kwargs):
+            seen['n_jobs'] = kwargs.get('n_jobs')
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(porosity_fe_analysis, 'POROSITY_CONFIGS',
+                            _TINY_CONFIGS)
+        monkeypatch.setattr(porosity_fe_analysis,
+                            'compare_configurations', _spy)
+        rc = porosity_fe_analysis.main([
+            '--vp', '0.02',
+            '--output-dir', str(tmp_path),
+            '--quiet',
+            '--jobs', '2',
+        ])
+        assert rc == 0
+        assert seen.get('n_jobs') == 2
+
+    def test_jobs_default_is_serial(self, tmp_path, monkeypatch):
+        """Default ``--jobs`` (omitted) must resolve to ``n_jobs=1`` so
+        the legacy deterministic behaviour is preserved for unsuspecting
+        callers and CI."""
+        seen = {}
+        original = porosity_fe_analysis.compare_configurations
+
+        def _spy(*args, **kwargs):
+            seen['n_jobs'] = kwargs.get('n_jobs')
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(porosity_fe_analysis, 'POROSITY_CONFIGS',
+                            _TINY_CONFIGS)
+        monkeypatch.setattr(porosity_fe_analysis,
+                            'compare_configurations', _spy)
+        rc = porosity_fe_analysis.main([
+            '--vp', '0.02',
+            '--output-dir', str(tmp_path),
+            '--quiet',
+        ])
+        assert rc == 0
+        assert seen.get('n_jobs') == 1
 
 
 class TestMaterialPropertiesPerturb:

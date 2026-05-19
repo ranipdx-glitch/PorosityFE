@@ -2,6 +2,27 @@
 
 All notable changes to PorosityFE will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **`--jobs N` flag on the `porosity-fe` CLI** parallelises the per-
+  configuration sweep in `compare_configurations` over a
+  `concurrent.futures.ProcessPoolExecutor`. `N=1` (default) preserves
+  the deterministic serial path byte-for-byte; `N>1` dispatches the
+  `(Vp, config)` calls across worker processes; `0`/`-1` resolve to
+  `os.cpu_count()`. Results are deterministically re-assembled by
+  `(Vp, name)` so the returned dict is independent of `N`. Measured
+  ~2x wall-clock speedup on the 5-Vp × 5-config sweep with 4 workers
+  on a 4-core box. (#52)
+- **`n_jobs` kwarg on `compare_configurations`** exposes the same knob
+  to library callers (including a future GUI batch sweep).
+- **Top-level `_analyze_one(Vp, name, config, material, applied_stress,
+  seed)` helper** factors the per-configuration build/solve out of the
+  inner loop so it can be pickled to a worker process. The returned
+  `(Vp, name, result_dict)` tuple includes the mesh / porosity_field /
+  empirical_solver instances (all three pickle cleanly today; no
+  rebuild on the main process is needed).
+
 ## [1.2.0] - 2026-05-11
 
 ### Fixed

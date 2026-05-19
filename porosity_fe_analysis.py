@@ -21,6 +21,7 @@ Dependencies:
 """
 
 import argparse
+import concurrent.futures
 import datetime
 import json
 import logging
@@ -3823,20 +3824,118 @@ class FESolver:
 # SECTION 8: ANALYSIS PIPELINE
 # ============================================================
 
+def _analyze_one(Vp: float,
+                 name: str,
+                 config: Dict,
+                 material_name: str,
+                 applied_stress: float,
+                 seed: Optional[int] = None) -> Tuple[float, str, Dict]:
+    """Build PorosityField/CompositeMesh/EmpiricalSolver for one (Vp, config).
+
+    Top-level (picklable) helper so this can be dispatched to a
+    :class:`concurrent.futures.ProcessPoolExecutor` from
+    :func:`compare_configurations` for a ~Nx speedup on the 5 x 5 sweep
+    (#52). Each call is fully independent — no shared mutable state — so
+    the result of the parallel execution is order-invariant.
+
+    The returned dict has the exact shape that the existing serial path
+    produces, so the assembly / ranking / plot / JSON code downstream is
+    unchanged.
+
+    Parameters
+    ----------
+    Vp : float
+        Void volume fraction in [0, 1].
+    name : str
+        Configuration name (key in ``POROSITY_CONFIGS``).
+    config : dict
+        Porosity-field constructor kwargs.
+    material_name : str
+        Material preset name. Resolved inside the worker so the parent
+        process doesn't need to pickle the :class:`MaterialProperties`
+        dataclass across the boundary (it's keyed by name anyway).
+    applied_stress : float
+        Reserved for downstream solver hooks. Accepted for parity with the
+        ``compare_configurations`` signature even though the empirical
+        knockdown does not currently consume it.
+    seed : int, optional
+        Recorded into the porosity field for reproducibility provenance.
+
+    Returns
+    -------
+    (Vp, name, result_dict)
+        Tuple keyed on ``(Vp, name)`` so the caller can deterministically
+        re-assemble results even when the worker pool reorders completion.
+    """
+    material = MATERIALS[material_name]
+    porosity_field = PorosityField(material, Vp, seed=seed, **config)
+    mesh = CompositeMesh(porosity_field, material, nx=30, ny=10, nz=12)
+    empirical = EmpiricalSolver(mesh, material)
+    emp_results = empirical.get_all_failure_loads()
+
+    result = {
+        'config': config,
+        'mesh': mesh,
+        'porosity_field': porosity_field,
+        'empirical_solver': empirical,
+        'empirical': emp_results,
+    }
+    return (Vp, name, result)
+
+
+def _resolve_n_jobs(n_jobs: Optional[int]) -> int:
+    """Normalise ``n_jobs`` to a positive worker count.
+
+    ``None``/``0``/``-1`` map to ``os.cpu_count() or 1`` so callers can
+    request "all cores" without having to look up the count themselves.
+    ``1`` preserves the serial path for reproducibility / debugging.
+    """
+    if n_jobs is None or n_jobs <= 0:
+        return os.cpu_count() or 1
+    return int(n_jobs)
+
+
 def compare_configurations(void_volume_fraction: float,
                            material_name: str = 'T800_epoxy',
                            applied_stress: float = -1500.0,
                            configs: Optional[Dict] = None,
-                           seed: Optional[int] = None) -> Dict:
-    """Main analysis function — loops through porosity configurations."""
+                           seed: Optional[int] = None,
+                           n_jobs: int = 1) -> Dict:
+    """Main analysis function — loops through porosity configurations.
+
+    Parameters
+    ----------
+    void_volume_fraction : float
+        Specimen-average void volume fraction in [0, 1].
+    material_name : str
+        Material preset name; validated against :data:`MATERIALS`.
+    applied_stress : float
+        Reserved for downstream solver hooks (empirical knockdown does
+        not currently consume it).
+    configs : dict, optional
+        Mapping of configuration name -> :class:`PorosityField` kwargs.
+        Defaults to the bundled :data:`POROSITY_CONFIGS`.
+    seed : int, optional
+        Recorded into provenance and threaded into each
+        :class:`PorosityField` for reproducibility (#55). The pipeline is
+        deterministic, so this does not alter results today.
+    n_jobs : int, optional
+        Number of worker processes to use for the per-configuration sweep
+        (#52). ``1`` (default) runs serially — bit-for-bit identical to
+        the legacy behaviour, useful for tests / debugging. ``N > 1``
+        dispatches the (Vp, config) calls to a
+        :class:`concurrent.futures.ProcessPoolExecutor` of that size.
+        ``0`` / ``-1`` / ``None`` resolve to :func:`os.cpu_count`. Results
+        are deterministically re-assembled by ``(Vp, name)`` regardless
+        of completion order, so the returned dict is independent of ``N``.
+    """
     if material_name not in MATERIALS:
         raise ValueError(
             f"Unknown material {material_name!r}. "
             f"Available presets: {sorted(MATERIALS)}."
         )
-    material = MATERIALS[material_name]
     configs = configs or POROSITY_CONFIGS
-    results = {}
+    workers = _resolve_n_jobs(n_jobs)
 
     _bar = '=' * 70
     logger.info("\n%s", _bar)
@@ -3844,28 +3943,49 @@ def compare_configurations(void_volume_fraction: float,
     logger.info("Material: %s", material_name)
     logger.info("%s", _bar)
 
-    for name, config in configs.items():
-        logger.info("\n  Configuration: %s", name)
-        porosity_field = PorosityField(material, void_volume_fraction,
-                                       seed=seed, **config)
-        mesh = CompositeMesh(porosity_field, material, nx=30, ny=10, nz=12)
+    # Build the (Vp, name, config, ...) task list once. We always iterate
+    # the original ``configs`` dict so the assembled output preserves the
+    # caller's configuration ordering (Python dicts are insertion-ordered)
+    # regardless of which worker finishes first.
+    tasks = [
+        (void_volume_fraction, name, config, material_name, applied_stress, seed)
+        for name, config in configs.items()
+    ]
 
-        empirical = EmpiricalSolver(mesh, material)
+    raw_results: Dict[Tuple[float, str], Dict] = {}
+    if workers == 1 or len(tasks) <= 1:
+        # Serial path — preserves the legacy behaviour byte-for-byte and
+        # avoids the ProcessPoolExecutor fork cost for trivially small
+        # sweeps. The per-config "Configuration: ..." log lines fire here
+        # too, mirroring the original CLI UX.
+        for Vp, name, config, mat, stress, sd in tasks:
+            logger.info("\n  Configuration: %s", name)
+            Vp_out, name_out, result = _analyze_one(
+                Vp, name, config, mat, stress, sd)
+            raw_results[(Vp_out, name_out)] = result
+            comp_kd = result['empirical']['compression']['judd_wright']['knockdown']
+            ilss_kd = result['empirical']['ilss']['judd_wright']['knockdown']
+            logger.info("    Compression KD (J-W): %.3f", comp_kd)
+            logger.info("    ILSS KD (J-W):        %.3f", ilss_kd)
+    else:
+        logger.info("Parallel sweep: %d task(s) across %d worker process(es)",
+                    len(tasks), workers)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_analyze_one, *task) for task in tasks]
+            for fut in concurrent.futures.as_completed(futures):
+                Vp_out, name_out, result = fut.result()
+                raw_results[(Vp_out, name_out)] = result
+                comp_kd = result['empirical']['compression']['judd_wright']['knockdown']
+                ilss_kd = result['empirical']['ilss']['judd_wright']['knockdown']
+                logger.info("  Configuration %s done — "
+                            "compression KD (J-W) %.3f, ILSS KD (J-W) %.3f",
+                            name_out, comp_kd, ilss_kd)
 
-        emp_results = empirical.get_all_failure_loads()
-
-        results[name] = {
-            'config': config,
-            'mesh': mesh,
-            'porosity_field': porosity_field,
-            'empirical_solver': empirical,
-            'empirical': emp_results,
-        }
-
-        comp_kd = emp_results['compression']['judd_wright']['knockdown']
-        ilss_kd = emp_results['ilss']['judd_wright']['knockdown']
-        logger.info("    Compression KD (J-W): %.3f", comp_kd)
-        logger.info("    ILSS KD (J-W):        %.3f", ilss_kd)
+    # Re-assemble in the original config insertion order so callers see a
+    # deterministic dict regardless of which worker finished first.
+    results: Dict[str, Dict] = {}
+    for name in configs:
+        results[name] = raw_results[(void_volume_fraction, name)]
 
     logger.info("\n%s", _bar)
     logger.info("RANKINGS (by compression strength, Judd-Wright)")
@@ -4141,6 +4261,20 @@ def _build_arg_parser() -> 'argparse.ArgumentParser':
         action="store_true",
         help="List the available material presets and exit.",
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Number of worker processes for the per-configuration sweep "
+            "in compare_configurations (#52). 1 (default) runs serially "
+            "(deterministic, byte-identical to legacy behaviour); N>1 "
+            "parallelises the (Vp, config) calls across N processes; 0 or "
+            "-1 uses os.cpu_count(). Results are deterministically "
+            "re-assembled regardless of N."
+        ),
+    )
     return parser
 
 
@@ -4259,6 +4393,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 material_name=args.material,
                 applied_stress=args.applied_stress,
                 seed=args.seed,
+                n_jobs=args.jobs,
             )
         except ValueError as exc:
             print(f"ERROR: bad input for Vp={Vp}: {exc}", file=sys.stderr)
