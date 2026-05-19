@@ -2862,6 +2862,51 @@ class TestCLIMain:
         assert rc == 0
         assert (tmp_path / 'porosity_analysis_results_2p5pct.json').exists()
 
+    def test_quiet_silences_progress_banner(
+            self, tmp_path, monkeypatch, capsys):
+        """Regression for #78: --quiet must suppress the analysis banner,
+        per-configuration lines, and trailing summary -- not just the
+        final 6-line trailer."""
+        monkeypatch.setattr(porosity_fe_analysis, 'POROSITY_CONFIGS',
+                            _TINY_CONFIGS)
+        rc = porosity_fe_analysis.main([
+            '--vp', '0.02',
+            '--output-dir', str(tmp_path),
+            '--quiet',
+        ])
+        assert rc == 0
+        captured = capsys.readouterr()
+        # Banner / per-config / mesh / trailer strings must all be gone.
+        assert 'POROSITY ANALYSIS' not in captured.out
+        assert 'Configuration:' not in captured.out
+        assert 'Mesh generated' not in captured.out
+        assert 'RANKINGS' not in captured.out
+        assert 'COMPLETE ANALYSIS FINISHED' not in captured.out
+        assert 'Saved:' not in captured.out
+
+    def test_default_emits_progress(self, tmp_path, monkeypatch, capsys):
+        """Without --quiet, the analysis banner and progress should still
+        appear so we don't break the interactive UX."""
+        monkeypatch.setattr(porosity_fe_analysis, 'POROSITY_CONFIGS',
+                            _TINY_CONFIGS)
+        rc = porosity_fe_analysis.main([
+            '--vp', '0.02',
+            '--output-dir', str(tmp_path),
+        ])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert 'POROSITY ANALYSIS' in captured.out
+        assert 'COMPLETE ANALYSIS FINISHED' in captured.out
+
+    def test_quiet_and_verbose_are_mutually_exclusive(self, tmp_path):
+        with pytest.raises(SystemExit) as exc:
+            porosity_fe_analysis.main([
+                '--vp', '0.02',
+                '--output-dir', str(tmp_path),
+                '--quiet', '--verbose',
+            ])
+        assert exc.value.code == 2
+
 
 class TestMaterialPropertiesPerturb:
     """Unit tests for the MaterialProperties.perturb sampling primitive."""
