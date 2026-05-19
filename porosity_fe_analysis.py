@@ -32,7 +32,7 @@ import subprocess
 import sys
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -3074,7 +3074,15 @@ class GlobalAssembler:
             key = self._element_cache_key(e)
             if key is not None and key not in self._ke_cache:
                 elem = self.create_element(e)
-                self._ke_cache[key] = elem.stiffness_matrix()
+                Ke = elem.stiffness_matrix()
+                # Symmetrize: Ke = B^T C B * |J| * w is mathematically
+                # symmetric, but the void-overflow finite-mask in
+                # Hex8Element.stiffness_matrix can break this for elements
+                # crossing the void modulus boundary, and FP accumulation
+                # across 8 Gauss points adds further drift. Iterative
+                # solvers (CG/MINRES) warn or fail on asymmetric K, so we
+                # enforce K = K^T at the source (issue #57).
+                self._ke_cache[key] = 0.5 * (Ke + Ke.T)
 
     def element_dof_indices(self, elem_idx: int) -> np.ndarray:
         """Global DOF indices (24,) for an element's 8 nodes."""
@@ -3125,6 +3133,10 @@ class GlobalAssembler:
             else:
                 elem = self.create_element(e)
                 Ke = elem.stiffness_matrix()
+                # Match the symmetrization applied in
+                # _cache_uniform_elements so cache-miss and cache-hit
+                # paths yield identical entries (issue #57).
+                Ke = 0.5 * (Ke + Ke.T)
                 self._cache_misses += 1
 
             dofs = self.element_dof_indices(e)
@@ -3697,7 +3709,9 @@ class FESolver:
     def solve(self, loading: str = 'compression',
               applied_strain: float = -0.01,
               applied_load: float = -10.0,
-              verbose: bool = False) -> FieldResults:
+              verbose: bool = False,
+              solver: Literal['direct', 'cg', 'minres'] = 'direct',
+              rtol: float = 1e-9) -> FieldResults:
         """Solve the static FE problem.
 
         Parameters
@@ -3714,11 +3728,33 @@ class FESolver:
             modes.
         verbose : bool
             Print progress information.
+        solver : {'direct', 'cg', 'minres'}
+            Linear solver to use for ``K u = F``. ``'direct'`` (default)
+            uses :func:`scipy.sparse.linalg.spsolve` (sparse LU). For
+            large meshes the LU fill-in dominates RAM; the penalty-modified
+            matrix is SPD, so ``'cg'`` (conjugate gradient) with a Jacobi
+            preconditioner is a memory-light alternative. ``'minres'``
+            is offered for completeness when the matrix is symmetric but
+            not strictly positive definite. Auto-switching is intentionally
+            *not* performed — callers select the path explicitly
+            (issue #57).
+        rtol : float
+            Relative-residual tolerance for the iterative solvers. Ignored
+            when ``solver='direct'``.
 
         Returns
         -------
         FieldResults
             Complete solution data.
+
+        Raises
+        ------
+        ValueError
+            If ``solver`` is not one of ``'direct'``, ``'cg'``, ``'minres'``.
+        RuntimeError
+            If the iterative solver fails to converge to ``rtol``, or if
+            the direct solve produces non-finite values / a residual above
+            ``1e-6``.
         """
         import time
         t0 = time.perf_counter()
@@ -3757,22 +3793,73 @@ class FESolver:
         K_mod, F_mod = BoundaryHandler.apply_penalty(K, F, constrained)
 
         # 4. Solve
-        if verbose:
-            logger.info("Solving system (%d DOFs)...", self.mesh.n_dof)
-        u = scipy.sparse.linalg.spsolve(K_mod, F_mod)
-
-        # Hygiene checks on the solution vector
-        if not np.isfinite(u).all():
-            raise RuntimeError(
-                "spsolve produced non-finite values (NaN or Inf) in the solution "
-                "vector. Check matrix conditioning and boundary conditions."
+        if solver not in ('direct', 'cg', 'minres'):
+            raise ValueError(
+                f"Unknown solver '{solver}'. "
+                "Use 'direct', 'cg', or 'minres'."
             )
-        _r = K_mod @ u - F_mod
-        _rel_res = np.linalg.norm(_r) / max(np.linalg.norm(F_mod), 1.0)  # type: ignore[call-overload,operator]
-        if _rel_res >= 1e-6:
-            raise RuntimeError(
-                f"spsolve residual {_rel_res:.4e} exceeds tolerance 1e-6. "
-                "Check matrix conditioning or penalty factor."
+        if verbose:
+            logger.info(
+                "Solving system (%d DOFs) with solver='%s'...",
+                self.mesh.n_dof, solver,
+            )
+
+        if solver == 'direct':
+            u = scipy.sparse.linalg.spsolve(K_mod, F_mod)
+
+            # Hygiene checks on the solution vector
+            if not np.isfinite(u).all():
+                raise RuntimeError(
+                    "spsolve produced non-finite values (NaN or Inf) in the solution "
+                    "vector. Check matrix conditioning and boundary conditions."
+                )
+            _r = K_mod @ u - F_mod
+            _rel_res = np.linalg.norm(_r) / max(np.linalg.norm(F_mod), 1.0)  # type: ignore[call-overload,operator]
+            if _rel_res >= 1e-6:
+                raise RuntimeError(
+                    f"spsolve residual {_rel_res:.4e} exceeds tolerance 1e-6. "
+                    "Check matrix conditioning or penalty factor."
+                )
+        else:
+            # Jacobi (diagonal) preconditioner: K is SPD after penalty,
+            # diag(K) is strictly positive.
+            diag = K_mod.diagonal()
+            if not np.all(diag > 0):
+                raise RuntimeError(
+                    "Cannot build Jacobi preconditioner: K_mod has a "
+                    "non-positive diagonal entry. Check assembly / penalty."
+                )
+            M = scipy.sparse.diags(1.0 / diag)
+
+            if solver == 'cg':
+                u, info = scipy.sparse.linalg.cg(
+                    K_mod, F_mod, M=M, rtol=rtol,
+                )
+            else:  # solver == 'minres'
+                u, info = scipy.sparse.linalg.minres(
+                    K_mod, F_mod, M=M, rtol=rtol,
+                )
+
+            _r = K_mod @ u - F_mod
+            _norm_b = float(np.linalg.norm(F_mod))  # type: ignore[call-overload]
+            _rel_res = float(
+                np.linalg.norm(_r) / _norm_b if _norm_b > 0.0 else 0.0  # type: ignore[call-overload,operator]
+            )
+            # Compare the achieved relative residual against the user-
+            # requested rtol directly. SciPy's iterative solvers can
+            # report info=0 while still bouncing off the machine-
+            # precision floor — if the user asked for sub-eps tolerance
+            # they will (correctly) get a non-convergence error.
+            _converged = info == 0 and _rel_res <= rtol * 10.0
+            if not _converged:
+                raise RuntimeError(
+                    f"{solver} failed to converge: info={info}, "
+                    f"achieved relative residual {_rel_res:.4e} "
+                    f"(requested rtol={rtol:.4e})."
+                )
+            logger.info(
+                "%s converged: relative residual %.4e (rtol=%.4e)",
+                solver, _rel_res, rtol,
             )
 
         if verbose:
