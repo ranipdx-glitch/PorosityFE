@@ -483,17 +483,23 @@ class VoidGeometry:
 
     def stress_concentration_factor(self) -> dict:
         ar = self.aspect_ratio
+        # 'transverse_tension' is matrix-dominated; pair its SCF with the
+        # in-plane shear value (issue #35).
         if ar < 1.2:  # Spherical
-            return {'compression': 2.0, 'tension': 2.0, 'shear': 1.5, 'ilss': 1.8}
+            return {'compression': 2.0, 'tension': 2.0, 'shear': 1.5,
+                    'ilss': 1.8, 'transverse_tension': 2.0}
         elif self.radii[0] > self.radii[2]:
             if self.radii[1] < self.radii[0] * 0.5:  # Cylindrical (prolate)
                 return {'compression': 1.5 + 0.5 * ar, 'tension': 1.5 + 0.5 * ar,
-                        'shear': 1.3 + 0.3 * ar, 'ilss': 1.5 + 0.4 * ar}
+                        'shear': 1.3 + 0.3 * ar, 'ilss': 1.5 + 0.4 * ar,
+                        'transverse_tension': 1.5 + 0.5 * ar}
             else:  # Penny (oblate)
                 return {'compression': 2.0 + 1.0 * ar, 'tension': 2.0 + 1.5 * ar,
-                        'shear': 1.5 + 0.8 * ar, 'ilss': 2.0 + 1.2 * ar}
+                        'shear': 1.5 + 0.8 * ar, 'ilss': 2.0 + 1.2 * ar,
+                        'transverse_tension': 2.0 + 1.5 * ar}
         else:
-            return {'compression': 2.0, 'tension': 2.0, 'shear': 1.5, 'ilss': 1.8}
+            return {'compression': 2.0, 'tension': 2.0, 'shear': 1.5,
+                    'ilss': 1.8, 'transverse_tension': 2.0}
 
     def volume(self) -> float:
         return (4.0 / 3.0) * np.pi * self.radii[0] * self.radii[1] * self.radii[2]
@@ -983,24 +989,35 @@ class EmpiricalSolver:
     # the calibration recipe for custom materials.
     # Modes: 'compression' (sigma_1c, fiber+matrix), 'tension' (sigma_1t,
     # fiber-dominated), 'shear' (tau_12, in-plane, matrix-dominated),
-    # 'ilss' (tau_ilss, short-beam, matrix/interface-dominated).
+    # 'ilss' (tau_ilss, short-beam, matrix/interface-dominated),
+    # 'transverse_tension' (sigma_2t, in-plane transverse, matrix-dominated;
+    # alpha matched to ilss because both fail by matrix/interface-dominated
+    # mechanisms — see issue #35).
     _JUDD_WRIGHT_ALPHA_QI = {
         'compression': 6.9, 'tension': 3.9, 'shear': 8.0, 'ilss': 10.0,
+        'transverse_tension': 10.0,
     }
     _POWER_LAW_N_QI = {
         'compression': 2.8, 'tension': 1.8, 'shear': 3.5, 'ilss': 4.5,
+        'transverse_tension': 4.5,
     }
     _LINEAR_BETA_QI = {
         'compression': 5.5, 'tension': 3.5, 'shear': 7.0, 'ilss': 9.0,
+        'transverse_tension': 9.0,
     }
     PRISTINE_STRENGTH_KEY = {
         'compression': 'sigma_1c', 'tension': 'sigma_1t',
         'shear': 'tau_12', 'ilss': 'tau_ilss',
+        'transverse_tension': 'sigma_2t',
     }
+    # Modes whose porosity sensitivity is matrix-/interface-dominated even in
+    # UD layups (where the longitudinal-fiber metric would otherwise drive
+    # f_md to ~0).  These modes use the elevated ``_F_MD_FLOOR_ILSS`` floor.
+    _MATRIX_DOMINATED_MODES = frozenset({'ilss', 'transverse_tension'})
     # QI reference fraction and minimum floor
     _F_MD_REF = 0.5    # f_md for the QI layup used in calibration
     _F_MD_FLOOR = 0.15  # even UD has some matrix sensitivity
-    _F_MD_FLOOR_ILSS = 0.80  # ILSS is always matrix-dominated
+    _F_MD_FLOOR_ILSS = 0.80  # ILSS / transverse-tension are always matrix-dominated
 
     def __init__(self, mesh: CompositeMesh, material: MaterialProperties,
                  ply_angles: Optional[List[float]] = None,
@@ -1037,7 +1054,8 @@ class EmpiricalSolver:
         self.JUDD_WRIGHT_ALPHA = {}
         self.POWER_LAW_N = {}
         self.LINEAR_BETA = {}
-        for mode in ['compression', 'tension', 'shear', 'ilss']:
+        for mode in ['compression', 'tension', 'shear', 'ilss',
+                     'transverse_tension']:
             s = self._layup_scale(mode)
             self.JUDD_WRIGHT_ALPHA[mode] = alpha_qi[mode] * s
             self.POWER_LAW_N[mode] = max(n_qi[mode] * s, 0.1)
@@ -1105,7 +1123,8 @@ class EmpiricalSolver:
         - f_md = 0 (UD) -> scale = floor (0.15 for most modes, 0.80 for ILSS)
         - f_md > f_md_ref -> scale > 1.0 (more matrix-dominated than QI)
         """
-        floor = self._F_MD_FLOOR_ILSS if mode == 'ilss' else self._F_MD_FLOOR
+        floor = (self._F_MD_FLOOR_ILSS if mode in self._MATRIX_DOMINATED_MODES
+                 else self._F_MD_FLOOR)
         ref = self._F_MD_REF
         if ref < 1e-12:
             return 1.0
@@ -1214,7 +1233,8 @@ class EmpiricalSolver:
 
     def get_all_failure_loads(self) -> dict:
         results = {}
-        for mode in ['compression', 'tension', 'shear', 'ilss']:
+        for mode in ['compression', 'tension', 'shear', 'ilss',
+                     'transverse_tension']:
             results[mode] = {}
             for model in ['judd_wright', 'power_law', 'linear']:
                 results[mode][model] = self.get_failure_load(mode, model)

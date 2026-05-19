@@ -340,15 +340,15 @@ or in-process via `validation/validate_all.py`.
 | Tensile strength | 7 | 6.9% |
 | Tensile modulus | 3 | 1.3% |
 | Transverse tensile modulus | 3 | 3.4% |
+| Transverse tensile strength | 3 | 7.4% |
 | Flexural modulus (D-matrix CLT) | 5 | 8.9% |
 | Compression strength | 2 | 11.4% |
 | Shear strength | 2 | 13.5% |
-| Transverse tensile strength | 3 | 14.5% |
 | Shear modulus (A-matrix CLT) | 1 | 15.4% |
 
 Overall MAE:
-- Property-weighted: **7.69%** across 35 (paper, property) pairs (each entry weighted equally — what `validate_porosity` reports as the headline).
-- Point-weighted: **7.03%** across 239 individual (Vp, normalized) data points (each measurement weighted equally — the standard convention in regression-error reporting).
+- Property-weighted: **7.09%** across 35 (paper, property) pairs (each entry weighted equally — what `validate_porosity` reports as the headline).
+- Point-weighted: **6.56%** across 239 individual (Vp, normalized) data points (each measurement weighted equally — the standard convention in regression-error reporting).
 
 The two aggregations differ because datasets carry very different numbers of points; `validate_porosity` prints both in the run summary.
 

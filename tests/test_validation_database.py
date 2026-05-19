@@ -405,12 +405,23 @@ def test_resolve_material_hta_uses_dedicated_preset():
 
 
 # ---------------------------------------------------------------------------
-# Issue #35 — transverse_tensile_strength is skipped, not misrouted
+# Issue #35 — transverse_tensile_strength is routed to the matrix-dominated
+# 'transverse_tension' mode (alpha = 10.0), NOT the longitudinal 'tension'
+# mode (alpha = 3.9, fiber-dominated, wrong physics).
 # ---------------------------------------------------------------------------
 
-def test_transverse_tensile_strength_is_skipped_in_run_all():
-    """Datasets with transverse_tensile_strength should show 'skipped' rather
-    than a spurious MAE computed via the wrong (longitudinal) failure mode."""
+def test_transverse_tensile_strength_is_routed_to_transverse_tension_mode():
+    """The property -> mode map must send transverse_tensile_strength to the
+    dedicated 'transverse_tension' mode rather than longitudinal 'tension'."""
+    from validation.validate_all import _PROPERTY_TO_MODE
+    assert _PROPERTY_TO_MODE['transverse_tensile_strength'] == 'transverse_tension'
+
+
+def test_transverse_tensile_strength_predicts_in_run_all():
+    """Datasets with transverse_tensile_strength must now produce a real MAE
+    (no longer skipped — see issue #35).  The MAE must be below the
+    fiber-dominated baseline that the longitudinal-tension misrouting
+    produced (~14.5% average across the 3 datasets)."""
     from validation.validate_all import run_all_datasets
     results = run_all_datasets()
 
@@ -422,19 +433,25 @@ def test_transverse_tensile_strength_is_skipped_in_run_all():
         if 'transverse_tensile_strength' not in ds:
             continue
         entry = ds['transverse_tensile_strength']
-        assert 'skipped' in entry, (
-            f"Expected 'skipped' for {ds_name}/transverse_tensile_strength "
-            f"but got: {entry}"
+        assert 'skipped' not in entry, (
+            f"{ds_name}/transverse_tensile_strength is no longer expected to be "
+            f"skipped after #35, but got: {entry}"
         )
-        assert 'mae' not in entry, (
-            f"transverse_tensile_strength for {ds_name} should not have an MAE "
-            "(would be computed via wrong physics)"
+        assert 'mae' in entry, (
+            f"{ds_name}/transverse_tensile_strength should produce an MAE; got: {entry}"
+        )
+        # The matrix-dominated mode must beat the broken longitudinal-tension
+        # MAE (Liu 15.1%, Stamopoulos 5.4%, Zhang 22.9% — pre-fix baselines).
+        assert entry['mae'] < 16.0, (
+            f"{ds_name}/transverse_tensile_strength MAE {entry['mae']:.2f}% "
+            f"unexpectedly large; the matrix-dominated mode should beat the "
+            f"longitudinal-tension misrouting."
         )
 
 
-def test_predict_strength_raises_for_transverse_tensile():
-    """predict_strength should raise ValueError for transverse_tensile_strength."""
-    import pytest
+def test_predict_strength_runs_for_transverse_tensile():
+    """predict_strength must succeed (no longer raises) for
+    transverse_tensile_strength after issue #35."""
     from validation.validate_all import predict_strength
 
     dataset = {
@@ -449,8 +466,11 @@ def test_predict_strength_raises_for_transverse_tensile():
         'baseline_porosity_pct': 0.0,
     }
 
-    with pytest.raises(ValueError, match='transverse_tensile_strength'):
-        predict_strength(dataset, 'transverse_tensile_strength', [1.0, 2.0, 3.0])
+    preds = predict_strength(dataset, 'transverse_tensile_strength', [1.0, 2.0, 3.0])
+    assert len(preds) == 3
+    # All knockdowns must be in (0, 1] and monotonically decreasing with Vp
+    assert all(0.0 < p <= 1.0 for p in preds)
+    assert preds[0] > preds[1] > preds[2]
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +499,7 @@ _MAE_BASELINES = {
     ('liu_2018', 'tensile_modulus'): 0.864,
     ('liu_2018', 'tensile_strength'): 5.26,
     ('liu_2018', 'transverse_tensile_modulus'): 3.286,
+    ('liu_2018', 'transverse_tensile_strength'): 5.696,
     ('olivier_1995', 'flexural_modulus'): 10.55,
     ('olivier_1995', 'ilss'): 1.554,
     ('olivier_1995', 'tensile_strength'): 15.667,
@@ -487,6 +508,7 @@ _MAE_BASELINES = {
     ('stamopoulos_2016', 'shear_modulus'): 15.387,
     ('stamopoulos_2016', 'shear_strength'): 4.353,
     ('stamopoulos_2016', 'transverse_tensile_modulus'): 1.022,
+    ('stamopoulos_2016', 'transverse_tensile_strength'): 2.493,
     ('tang_1987', 'flexural_modulus'): 7.933,
     ('tang_1987', 'ilss'): 8.374,
     ('tang_1987', 'tensile_strength'): 10.923,
@@ -497,6 +519,7 @@ _MAE_BASELINES = {
     ('wen_2023', 'shear_strength'): 22.644,
     ('wen_2023', 'tensile_strength'): 6.583,
     ('zhang_peek_2025', 'transverse_tensile_modulus'): 5.96,
+    ('zhang_peek_2025', 'transverse_tensile_strength'): 14.077,
 }
 
 

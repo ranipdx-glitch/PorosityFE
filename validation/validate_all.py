@@ -158,21 +158,20 @@ from porosity_fe_analysis import (
 _PROPERTY_TO_MODE = {
     'compression_strength': 'compression',
     'tensile_strength': 'tension',
-    # 'transverse_tensile_strength' is intentionally excluded: EmpiricalSolver
-    # supports only longitudinal modes ('tension', 'compression', 'shear',
-    # 'ilss').  Routing a transverse property to the longitudinal 'tension' mode
-    # produces physically incorrect alpha/n coefficients (fiber-dominated vs.
-    # matrix-dominated failure).  Until a calibrated 'transverse_tension' mode
-    # is added to EmpiricalSolver, transverse_tensile_strength is skipped in
-    # MAE calculations.  See GitHub issue #35.
+    # 'transverse_tensile_strength' is matrix-dominated (failure controlled by
+    # matrix/interface, not fibers), so it routes to the dedicated
+    # 'transverse_tension' mode in EmpiricalSolver — calibrated with the same
+    # alpha = 10.0 as ILSS rather than the fiber-dominated longitudinal-tension
+    # alpha = 3.9.  See GitHub issue #35.
+    'transverse_tensile_strength': 'transverse_tension',
     'shear_strength': 'shear',
     'ilss': 'ilss',
 }
 
 # Properties that cannot currently be predicted by EmpiricalSolver due to
-# missing calibrated failure modes.  They are skipped with a logged warning
-# rather than silently misrouted to the wrong physics.
-_UNSUPPORTED_STRENGTH_PROPS = {'transverse_tensile_strength'}
+# missing calibrated failure modes.  Currently empty: 'transverse_tensile_strength'
+# is now supported via the dedicated 'transverse_tension' mode (issue #35).
+_UNSUPPORTED_STRENGTH_PROPS: set = set()
 
 
 def predict_strength(dataset: Dict[str, Any], prop_key: str,
@@ -184,17 +183,17 @@ def predict_strength(dataset: Dict[str, Any], prop_key: str,
     Raises
     ------
     ValueError
-        If *prop_key* is in ``_UNSUPPORTED_STRENGTH_PROPS`` (e.g.
-        ``'transverse_tensile_strength'``), because EmpiricalSolver has no
-        calibrated failure mode for it and silently misrouting it would yield
-        incorrect physics.  The caller (``run_all_datasets``) logs a warning and
-        records an error entry instead of raising to the user.
+        If *prop_key* is in ``_UNSUPPORTED_STRENGTH_PROPS``, because
+        EmpiricalSolver has no calibrated failure mode for it and silently
+        misrouting it would yield incorrect physics.  The caller
+        (``run_all_datasets``) logs a warning and records an error entry
+        instead of raising to the user.
     """
     if prop_key in _UNSUPPORTED_STRENGTH_PROPS:
         msg = (
             f"Property '{prop_key}' is not supported by EmpiricalSolver: no "
-            "calibrated transverse failure mode exists.  Skipping MAE calculation "
-            "to avoid physically incorrect predictions.  See issue #35."
+            "calibrated failure mode exists.  Skipping MAE calculation "
+            "to avoid physically incorrect predictions."
         )
         logger.warning(msg)
         raise ValueError(msg)

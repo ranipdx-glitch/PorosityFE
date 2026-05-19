@@ -504,6 +504,51 @@ class TestEmpiricalSolver:
         kd_ilss = self.solver._judd_wright(Vp, 'ilss')
         assert kd_ilss < kd_comp
 
+    # ----- issue #35: dedicated 'transverse_tension' mode -----------------
+    def test_transverse_tension_mode_registered(self):
+        """Issue #35: 'transverse_tension' must be a first-class mode keyed
+        off sigma_2t with alpha = 10.0 (matrix-dominated, same as ILSS)."""
+        assert 'transverse_tension' in EmpiricalSolver.PRISTINE_STRENGTH_KEY
+        assert EmpiricalSolver.PRISTINE_STRENGTH_KEY['transverse_tension'] == 'sigma_2t'
+        assert EmpiricalSolver._JUDD_WRIGHT_ALPHA_QI['transverse_tension'] == 10.0
+
+    def test_transverse_tension_distinct_from_longitudinal_tension(self):
+        """At the same Vp, transverse_tension knockdown must NOT equal
+        longitudinal-tension knockdown (the bug routed sigma_2t through
+        alpha=3.9 instead of the matrix-dominated alpha=10.0)."""
+        Vp = 0.03
+        kd_t = self.solver._judd_wright(Vp, 'tension')
+        kd_tt = self.solver._judd_wright(Vp, 'transverse_tension')
+        assert kd_tt < kd_t, (
+            f"transverse_tension ({kd_tt}) must be more porosity-sensitive "
+            f"than longitudinal tension ({kd_t}) at the same Vp"
+        )
+
+    def test_transverse_tension_matches_ilss_alpha_at_qi(self):
+        """transverse_tension and ilss share the same matrix-dominated alpha
+        at the QI reference layup (f_md = 0.5, scale = 1.0)."""
+        Vp = 0.04
+        kd_ilss = self.solver._judd_wright(Vp, 'ilss')
+        kd_tt = self.solver._judd_wright(Vp, 'transverse_tension')
+        assert abs(kd_ilss - kd_tt) < 1e-12
+
+    def test_transverse_tension_uses_sigma_2t(self):
+        """get_failure_load(mode='transverse_tension') must use sigma_2t as
+        the pristine strength."""
+        result = self.solver.get_failure_load(mode='transverse_tension',
+                                              model='judd_wright')
+        expected = self.material.sigma_2t * result['knockdown']
+        assert abs(result['failure_stress'] - expected) < 1e-9
+
+    def test_transverse_tension_ud_uses_matrix_floor(self):
+        """UD [0]_n layup: transverse_tension should hit the matrix-dominated
+        floor (0.80), matching ILSS, not the fiber-dominated floor (0.15)."""
+        ud = [0.0] * 8
+        solver = EmpiricalSolver(self.mesh, self.material, ply_angles=ud)
+        # alpha_QI = 10.0; scale = max(0/0.5, 0.80) = 0.80
+        assert abs(solver.JUDD_WRIGHT_ALPHA['transverse_tension'] - 10.0 * 0.80) < 1e-12
+        assert abs(solver.JUDD_WRIGHT_ALPHA['ilss'] - 10.0 * 0.80) < 1e-12
+
     def test_get_failure_load_returns_dict(self):
         result = self.solver.get_failure_load(mode='compression', model='judd_wright')
         assert 'failure_stress' in result
