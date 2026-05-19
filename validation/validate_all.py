@@ -439,6 +439,16 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+# Share the project-wide rcParams (fonts, DPI, cividis colormap, etc.)
+# with the static-PNG path in ``porosity_fe_analysis`` and the Streamlit
+# app in ``app.py`` so all three cannot drift (#53).
+from porosity_fe_analysis import (  # noqa: E402
+    LABEL_MAE_PCT,
+    _configure_matplotlib_style,
+)
+
+_configure_matplotlib_style()
+
 
 def generate_master_report(results: Dict[str, Any], output_dir: str = None):
     """Generate master validation report (PNG plot + Markdown table)."""
@@ -479,16 +489,17 @@ def generate_master_report(results: Dict[str, Any], output_dir: str = None):
     x = np.arange(len(labels))
     ax.bar(x, values, color=colors, edgecolor='black', linewidth=0.5)
     ax.set_xticks(x)
+    # Tick labels intentionally smaller than rcParams.xtick.labelsize: this
+    # axis has 30+ rotated "dataset\nproperty" labels and needs the room.
     ax.set_xticklabels(labels, rotation=90, fontsize=7)
-    ax.set_ylabel('MAE (%)', fontsize=12)
-    ax.set_title('Master Validation Report: MAE across all papers/properties',
-                 fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
+    ax.set_ylabel(LABEL_MAE_PCT)
+    ax.set_title('Master Validation Report: MAE across all papers/properties')
+    ax.grid(True, axis='y')
     plt.tight_layout()
     plot_path = os.path.join(output_dir, 'validation_master_report.png')
-    # dpi=300 to match every other static PNG in the project (#53);
-    # bbox/dpi defaults also come from porosity_fe_analysis._apply_plot_style.
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    # DPI and bbox come from ``_configure_matplotlib_style`` (#53) so the
+    # validation PNG matches the rest of the project's static PNGs.
+    plt.savefig(plot_path)
     plt.close(fig)
 
     md_lines = ['# Master Validation Report', '']

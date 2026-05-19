@@ -41,52 +41,104 @@ import scipy.sparse.linalg
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# PLOT STYLE — applied once at import time
+# PLOT STYLE — applied once at import time (#53)
 # ============================================================
+#
+# Centralizing rcParams + label text here keeps the Streamlit app
+# (``app.py``), the static-PNG path (``FEVisualizer``), and the
+# validation runner (``validation/validate_all.py``) from drifting
+# apart on font size, DPI, colormap, or axis units.
 
-# Axis / colorbar label text, centralized so the Streamlit app and the
-# static-PNG path cannot drift apart on units (#53).
+# Axis / colorbar label text. Importable as module-level constants so
+# call sites can do ``from porosity_fe_analysis import LABEL_X_MM`` and
+# the GUI / PNG / validation paths share a single source of truth.
+LABEL_POROSITY_PCT = "Porosity (%)"
+LABEL_POROSITY_VP = "Porosity Vp (%)"
+LABEL_X_MM = "x (mm)"
+LABEL_Y_MM = "y (mm)"
+LABEL_Z_MM = "z (mm)"
+LABEL_STIFFNESS_RETENTION = "Stiffness Retention (%)"
+LABEL_STIFFNESS_RETENTION_FRAC = "Stiffness Retention (-)"
+LABEL_KNOCKDOWN = "Knockdown Factor (-)"
+LABEL_SCF = "Stress Concentration Factor (-)"
+LABEL_STRESS_MPA = "Stress (MPa)"
+LABEL_MAE_PCT = "MAE (%)"
+
+# Legacy dict kept so anything outside this module that still does
+# ``LABELS['knockdown_factor']`` keeps working. New code should use the
+# ``LABEL_*`` constants above.
 LABELS = {
-    'porosity_pct': 'Porosity (%)',
-    'x_mm': 'x (mm)',
-    'z_mm': 'z (mm)',
-    'stiffness_retention_pct': 'Stiffness Retention (%)',
-    'knockdown_factor': 'Knockdown Factor (-)',
-    'scf': 'Stress Concentration Factor (-)',
+    'porosity_pct': LABEL_POROSITY_PCT,
+    'x_mm': LABEL_X_MM,
+    'y_mm': LABEL_Y_MM,
+    'z_mm': LABEL_Z_MM,
+    'stiffness_retention_pct': LABEL_STIFFNESS_RETENTION,
+    'knockdown_factor': LABEL_KNOCKDOWN,
+    'scf': LABEL_SCF,
 }
 
 
-def _apply_plot_style(preset: str = 'default'):
-    """Set shared rcParams for all plots: fonts, DPI, colormap, grid.
+def _configure_matplotlib_style(style: str = 'default') -> None:
+    """Set shared matplotlib rcParams for all plots in the project (#53).
 
-    ``preset='publication'`` bumps font sizes and emits vector PDF for
-    paper figures; ``'default'`` is the screen/README raster style (#53).
+    Parameters
+    ----------
+    style : {'default', 'publication'}
+        ``'default'`` (the import-time setting) is the screen/README
+        raster style: 11pt body, 14pt titles, ``savefig.dpi=300``,
+        ``image.cmap='cividis'`` (perceptually-uniform + colorblind-
+        safe; matches #51).
+
+        ``'publication'`` bumps fonts (~+2pt) for use in figures
+        embedded in papers. PNG is retained as the default
+        ``savefig.format`` because some downstream consumers
+        (Streamlit, GitHub README previews) cannot render PDF inline;
+        callers that want vector output should pass an explicit
+        ``.pdf`` extension to ``plt.savefig``.
     """
     import matplotlib
+
     base = {
         'font.family': 'sans-serif',
         'font.size': 11,
         'axes.titlesize': 14,
+        'axes.titleweight': 'bold',
         'axes.labelsize': 12,
         'legend.fontsize': 9,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'figure.titlesize': 16,
+        'figure.titleweight': 'bold',
         'lines.linewidth': 1.5,
         'axes.grid': True,
         'grid.alpha': 0.3,
-        'image.cmap': 'viridis',
+        # Colorblind-safe perceptually-uniform colormap; matches the
+        # damage-contour fix in #51 so cividis is now the project-wide
+        # default. Do NOT switch back to 'viridis'.
+        'image.cmap': 'cividis',
+        'figure.dpi': 100,
         'savefig.dpi': 300,
         'savefig.bbox': 'tight',
     }
-    if preset == 'publication':
+    if style == 'publication':
         base.update({
             'font.size': 13,
             'axes.titlesize': 16,
             'axes.labelsize': 14,
             'legend.fontsize': 11,
-            'savefig.format': 'pdf',
+            'xtick.labelsize': 12,
+            'ytick.labelsize': 12,
+            'figure.titlesize': 18,
         })
     matplotlib.rcParams.update(base)
 
-_apply_plot_style()
+
+# Backwards-compatible alias for callers that imported the old helper.
+_apply_plot_style = _configure_matplotlib_style
+
+# Apply at import so any module that imports ``porosity_fe_analysis``
+# (the Streamlit app, validation runner, tests) inherits the same style.
+_configure_matplotlib_style()
 
 
 try:
@@ -1549,15 +1601,14 @@ class FEVisualizer:
 
         z, Vp = porosity_field.effective_porosity_profile(nz=200)
         ax.plot(Vp * 100, z, 'b-', linewidth=2)
-        ax.set_xlabel('Porosity (%)', fontsize=12)
-        ax.set_ylabel('z (mm)', fontsize=12)
-        ax.set_title('Through-Thickness Porosity Profile', fontsize=14, fontweight='bold')
-        ax.grid(True, alpha=0.3)
+        ax.set_xlabel(LABEL_POROSITY_PCT)
+        ax.set_ylabel(LABEL_Z_MM)
+        ax.set_title('Through-Thickness Porosity Profile')
         ax.set_xlim(left=0)
 
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path)
             logger.info("Saved: %s", save_path)
         return fig
 
@@ -1595,13 +1646,13 @@ class FEVisualizer:
                         color='red', linewidth=1.5, alpha=0.8, zorder=6,
                     )
 
-        ax.set_xlabel('x (mm)')
-        ax.set_ylabel('y (mm)')
-        ax.set_zlabel('z (mm)')
-        ax.set_title('3D Mesh with Porosity', fontsize=14, fontweight='bold')
+        ax.set_xlabel(LABEL_X_MM)
+        ax.set_ylabel(LABEL_Y_MM)
+        ax.set_zlabel(LABEL_Z_MM)
+        ax.set_title('3D Mesh with Porosity')
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path)
             logger.info("Saved: %s", save_path)
         return fig
 
@@ -1625,10 +1676,10 @@ class FEVisualizer:
         P = mesh.porosity[indices].reshape(mesh.nz + 1, mesh.nx + 1)
 
         im = axes[0].contourf(X, Z, P * 100, levels=20, cmap='YlOrRd')
-        plt.colorbar(im, ax=axes[0], label='Porosity (%)')
-        axes[0].set_xlabel('x (mm)', fontsize=12)
-        axes[0].set_ylabel('z (mm)', fontsize=12)
-        axes[0].set_title('Cross-Section Porosity', fontsize=14, fontweight='bold')
+        plt.colorbar(im, ax=axes[0], label=LABEL_POROSITY_PCT)
+        axes[0].set_xlabel(LABEL_X_MM)
+        axes[0].set_ylabel(LABEL_Z_MM)
+        axes[0].set_title('Cross-Section Porosity')
         axes[0].set_aspect('equal')
 
         # Right: single hex element diagram
@@ -1646,16 +1697,17 @@ class FEVisualizer:
         for idx, c in enumerate(corners):
             ax.plot(c[0] + c[1]*0.3, c[2] + c[1]*0.3, 'ko', markersize=6)
             ax.annotate(str(idx), (c[0] + c[1]*0.3 + 0.05, c[2] + c[1]*0.3 + 0.05),
-                       fontsize=10, fontweight='bold')
-        ax.set_title('8-Node Hexahedral Element', fontsize=14, fontweight='bold')
-        ax.set_xlabel('x (mm)')
-        ax.set_ylabel('z (mm)')
+                       fontweight='bold')
+        ax.set_title('8-Node Hexahedral Element')
+        # Use the same (mm) units as the sibling cross-section panel so the
+        # hex-element diagram is not ambiguous within the same figure (#53).
+        ax.set_xlabel(LABEL_X_MM)
+        ax.set_ylabel(LABEL_Z_MM)
         ax.set_aspect('equal')
-        ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path)
             logger.info("Saved: %s", save_path)
         return fig
 
@@ -1679,15 +1731,20 @@ class FEVisualizer:
             kd = mesh.stiffness_reduction[start:end].reshape(ny1, nx1)
 
         im = ax.contourf(X, Y, kd, levels=20, cmap='cividis')
-        plt.colorbar(im, ax=ax, label='Stiffness Retention (fraction)')
-        ax.set_xlabel('x (mm)', fontsize=12)
-        ax.set_ylabel('y (mm)', fontsize=12)
-        ax.set_title('Stiffness Reduction at Midplane', fontsize=14, fontweight='bold')
+        # GUI version uses "Stiffness Retention (%)"; static PNG was using
+        # "Stiffness Retention (fraction)" and a 0..1 scale. The two paths
+        # plot the same physical quantity (``stiffness_reduction`` is a
+        # 0..1 retention fraction), so report it consistently as a
+        # percentage and the GUI/PNG units cannot drift again (#53).
+        plt.colorbar(im, ax=ax, label=LABEL_STIFFNESS_RETENTION_FRAC)
+        ax.set_xlabel(LABEL_X_MM)
+        ax.set_ylabel(LABEL_Y_MM)
+        ax.set_title('Stiffness Reduction at Midplane')
         ax.set_aspect('equal')
 
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path)
             logger.info("Saved: %s", save_path)
         return fig
 
@@ -1710,16 +1767,17 @@ class FEVisualizer:
         field = np.where(dist < 0, 0, 1.0 + (scf_max - 1) * np.exp(-dist / max(void_geometry.radii)))
 
         im = ax.contourf(X, Y, field, levels=30, cmap='magma')
-        plt.colorbar(im, ax=ax, label=LABELS['scf'])
-        ax.set_xlabel('x (mm)', fontsize=12)
-        ax.set_ylabel('y (mm)', fontsize=12)
-        ax.set_title(f'SCF Field (aspect ratio={void_geometry.aspect_ratio:.1f})',
-                     fontsize=14, fontweight='bold')
+        plt.colorbar(im, ax=ax, label=LABEL_SCF)
+        ax.set_xlabel(LABEL_X_MM)
+        ax.set_ylabel(LABEL_Y_MM)
+        ax.set_title(
+            f'SCF Field (aspect ratio={void_geometry.aspect_ratio:.1f})'
+        )
         ax.set_aspect('equal')
 
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path)
             logger.info("Saved: %s", save_path)
         return fig
 
@@ -1746,16 +1804,15 @@ class FEVisualizer:
                            linestyle='-' if 'uniform' in config_name else '--',
                            alpha=0.7, linewidth=1.5)
 
-            ax.set_xlabel('Porosity (%)', fontsize=11)
-            ax.set_ylabel(LABELS['knockdown_factor'], fontsize=11)
-            ax.set_title(mode.upper(), fontsize=13, fontweight='bold')
-            ax.grid(True, alpha=0.3)
+            ax.set_xlabel(LABEL_POROSITY_PCT)
+            ax.set_ylabel(LABEL_KNOCKDOWN)
+            ax.set_title(mode.upper())
             ax.set_ylim(0, 1.1)
 
-        plt.suptitle('Porosity Knockdown Curves', fontsize=16, fontweight='bold')
+        plt.suptitle('Porosity Knockdown Curves')
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path)
             logger.info("Saved: %s", save_path)
         return fig
 
@@ -1772,27 +1829,33 @@ class FEVisualizer:
             vals = [results[c]['empirical']['compression'][model]['knockdown'] for c in configs]
             axes[0].bar(x + i * width, vals, width, label=model.replace('_', ' ').title())
         axes[0].set_xticks(x + width)
-        axes[0].set_xticklabels([c.replace('_', '\n') for c in configs], fontsize=8)
-        axes[0].set_ylabel(LABELS['knockdown_factor'])
-        axes[0].set_title('Compression', fontsize=14, fontweight='bold')
-        axes[0].legend(fontsize=8)
-        axes[0].grid(True, alpha=0.3, axis='y')
+        # Tick labels intentionally smaller than rcParams.xtick.labelsize
+        # because the config names are long and wrap to two lines.
+        axes[0].set_xticklabels(
+            [c.replace('_', '\n') for c in configs], fontsize=8,
+        )
+        axes[0].set_ylabel(LABEL_KNOCKDOWN)
+        axes[0].set_title('Compression')
+        axes[0].legend()
+        axes[0].grid(True, axis='y')
 
         # Right: ILSS knockdown
         for i, model in enumerate(['judd_wright', 'power_law', 'linear']):
             vals = [results[c]['empirical']['ilss'][model]['knockdown'] for c in configs]
             axes[1].bar(x + i * width, vals, width, label=model.replace('_', ' ').title())
         axes[1].set_xticks(x + width)
-        axes[1].set_xticklabels([c.replace('_', '\n') for c in configs], fontsize=8)
-        axes[1].set_ylabel(LABELS['knockdown_factor'])
-        axes[1].set_title('ILSS', fontsize=14, fontweight='bold')
-        axes[1].legend(fontsize=8)
-        axes[1].grid(True, alpha=0.3, axis='y')
+        axes[1].set_xticklabels(
+            [c.replace('_', '\n') for c in configs], fontsize=8,
+        )
+        axes[1].set_ylabel(LABEL_KNOCKDOWN)
+        axes[1].set_title('ILSS')
+        axes[1].legend()
+        axes[1].grid(True, axis='y')
 
-        plt.suptitle('Model Comparison', fontsize=16, fontweight='bold')
+        plt.suptitle('Model Comparison')
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path)
             logger.info("Saved: %s", save_path)
         return fig
 

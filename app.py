@@ -37,12 +37,22 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from porosity_fe_analysis import (
+    LABEL_KNOCKDOWN,
+    LABEL_POROSITY_PCT,
+    LABEL_STIFFNESS_RETENTION,
+    LABEL_X_MM,
+    LABEL_Z_MM,
     MATERIALS,
     CompositeMesh,
     EmpiricalSolver,
     FESolver,
     PorosityField,
+    _configure_matplotlib_style,
 )
+
+# Re-apply the shared style after Streamlit/matplotlib finished their own
+# rcParams nudges, so the Streamlit plots match the static PNGs (#53).
+_configure_matplotlib_style()
 
 
 # ======================================================================
@@ -759,11 +769,9 @@ def plot_profile(result: dict):
     pf = result["porosity_field"]
     z, Vp = pf.effective_porosity_profile(nz=200)
     ax.plot(Vp * 100, z, "b-", linewidth=2)
-    ax.set_xlabel("Porosity (%)", fontsize=11)
-    ax.set_ylabel("z (mm)", fontsize=11)
-    ax.set_title("Through-Thickness Porosity Profile",
-                 fontsize=12, fontweight="bold")
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel(LABEL_POROSITY_PCT)
+    ax.set_ylabel(LABEL_Z_MM)
+    ax.set_title("Through-Thickness Porosity Profile")
     ax.set_xlim(left=0)
     fig.tight_layout()
     return fig
@@ -789,7 +797,7 @@ def plot_mesh(result: dict):
 
     im = ax.contourf(X, Z, Sr * 100, levels=20, cmap="cividis",
                      vmin=max(0, Sr.min() * 100 - 1), vmax=100)
-    fig.colorbar(im, ax=ax, label="Stiffness Retention (%)")
+    fig.colorbar(im, ax=ax, label=LABEL_STIFFNESS_RETENTION)
 
     step_x = max(1, mesh.nx // 20)
     step_z = max(1, mesh.nz // 20)
@@ -837,14 +845,13 @@ def plot_mesh(result: dict):
             ax.plot([], [], "s", color="white", markeredgecolor="red",
                     markeredgewidth=1.0,
                     label=f"Voids ({len(void_patches)})")
-            ax.legend(fontsize=8, loc="upper right")
+            ax.legend(loc="upper right")
 
-    ax.set_xlabel("x (mm)", fontsize=11)
-    ax.set_ylabel("z (mm)", fontsize=11)
+    ax.set_xlabel(LABEL_X_MM)
+    ax.set_ylabel(LABEL_Z_MM)
     ax.set_title(
         f"FE Mesh — Stiffness Retention  |  "
-        f"{len(mesh.nodes):,} nodes, {len(mesh.elements):,} elements",
-        fontsize=12, fontweight="bold",
+        f"{len(mesh.nodes):,} nodes, {len(mesh.elements):,} elements"
     )
     ax.set_aspect("equal")
     fig.tight_layout()
@@ -893,23 +900,24 @@ def plot_results(result: dict, layup_str: str):
                        label=label if bx == bar_x[0] else "")
 
     ax.set_xticks(x)
-    ax.set_xticklabels([m.upper() for m in modes], fontsize=10)
-    ax.set_ylabel("Knockdown Factor", fontsize=11)
+    ax.set_xticklabels([m.upper() for m in modes])
+    ax.set_ylabel(LABEL_KNOCKDOWN)
     ax.set_title(
         f"Knockdown Factor by Loading Mode  |  "
         f"Vp = {cfg['Vp']:.1f}%, {cfg['void_shape']}, "
-        f"{cfg['distribution']}, {layup_str}",
-        fontsize=11, fontweight="bold",
+        f"{cfg['distribution']}, {layup_str}"
     )
     ax.set_ylim(0, 1.1)
-    ax.legend(fontsize=8, loc="lower left")
-    ax.grid(True, alpha=0.3, axis="y")
+    ax.legend(loc="lower left")
+    ax.grid(True, axis="y")
 
     note = ("Solid bars = strength knockdown (at mean Vp); "
             "hatched bar = stiffness knockdown (FE)")
     if f_md < 0.49:
         note += (f"\nLayup scaling: f_md = {f_md:.2f} "
                  "(coefficients reduced for fiber-dominated layup)")
+    # Footnote intentionally smaller than rcParams.font.size (annotation, not
+    # primary data); explicit override kept here on purpose.
     ax.text(0.01, 0.01, note, transform=ax.transAxes,
             fontsize=7, color="0.4", va="bottom")
 
@@ -934,7 +942,7 @@ def plot_stress(result: dict, comp_name: str):
     if fe_field is None:
         ax.text(0.5, 0.5, "No FE results available.",
                 transform=ax.transAxes, ha="center", va="center",
-                fontsize=12, color="0.5")
+                color="0.5")
         ax.set_axis_off()
         return fig
 
@@ -985,14 +993,13 @@ def plot_stress(result: dict, comp_name: str):
     else:
         ax.text(0.5, 0.5, "Insufficient interior data for contour plot.",
                 transform=ax.transAxes, ha="center", va="center",
-                fontsize=10, color="0.5")
+                color="0.5")
 
-    ax.set_xlabel("x (mm)", fontsize=11)
-    ax.set_ylabel("z (mm)", fontsize=11)
+    ax.set_xlabel(LABEL_X_MM)
+    ax.set_ylabel(LABEL_Z_MM)
     ax.set_title(
         f"FE Stress (local/material frame): {comp_name}  |  "
-        "interior, mid-y cross-section",
-        fontsize=11, fontweight="bold",
+        "interior, mid-y cross-section"
     )
     ax.set_aspect("equal")
     fig.tight_layout()
