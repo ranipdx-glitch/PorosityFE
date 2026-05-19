@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import sys
-import warnings
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -64,59 +63,85 @@ import dataclasses
 from porosity_fe_analysis import MATERIALS, MaterialProperties
 
 
+# Mapping from a dataset's (fiber, matrix) pair to a named preset in
+# ``porosity_fe_analysis.MATERIALS``.  Every dataset shipped under
+# ``validation/datasets/`` MUST have an entry here; ``resolve_material`` now
+# raises ``KeyError`` on a missing key rather than silently defaulting to
+# ``T700_epoxy`` (issue #34).  When adding a new dataset, add the matching
+# preset to ``MATERIALS`` first, then map it here.
+#
+# Generic "Carbon / epoxy" labels (Almeida 1994, Wang 2022) are mapped to
+# ``T700_epoxy`` only because the source papers do not name the fibre or
+# matrix system explicitly; this is the closest defensible generic carbon
+# preset.  Mapping AS4/3501-6 to the dedicated ``AS4_3501_6_epoxy`` preset
+# (rather than ``T700_epoxy``) corrects a systematic IM-class vs.
+# standard-modulus mismatch flagged in issue #34.
 _FIBER_MATRIX_TO_PRESET = {
     ('T700', 'TDE85 epoxy'): 'T700_epoxy',
     ('T700GC-12K-31E', '#2510 epoxy'): 'T700_epoxy',
     ('T700', 'epoxy'): 'T700_epoxy',
-    ('HTA 24k', 'EHkF 420 epoxy'): 'T700_epoxy',
+    ('HTA 24k', 'EHkF 420 epoxy'): 'HTA_EHkF420_epoxy',
     ('IM7', '8551-7 epoxy'): 'IM7_8551_epoxy',
     ('T300', '924 epoxy'): 'T300_934_epoxy',
     ('T300', '976 epoxy'): 'T300_934_epoxy',
     ('T300', '934 epoxy'): 'T300_934_epoxy',
     ('T300', '914 epoxy'): 'T300_934_epoxy',
     ('Carbon fiber (PEEK-CF60)', 'PEEK (thermoplastic)'): 'CF_PEEK',
-    ('AS4', '3501-6 epoxy'): 'T700_epoxy',
-    ('AS4 fabric', '3501-6 epoxy'): 'T700_epoxy',
+    ('AS4', '3501-6 epoxy'): 'AS4_3501_6_epoxy',
+    ('AS4 fabric', '3501-6 epoxy'): 'AS4_3501_6_epoxy',
+    # Generic-carbon datasets where the source paper does not name the
+    # fibre/matrix system. T700_epoxy is the closest defensible match
+    # for a standard-modulus carbon/epoxy.
     ('Carbon', 'epoxy'): 'T700_epoxy',
     ('Carbon fiber', 'epoxy'): 'T700_epoxy',
 }
 
 
-def resolve_material(dataset: Dict[str, Any], strict: bool = False) -> MaterialProperties:
+def resolve_material(dataset: Dict[str, Any], strict: bool = True) -> MaterialProperties:
     """Build a MaterialProperties instance from a dataset's material block.
 
-    Selects the closest preset from MATERIALS based on fiber/matrix, then
-    overrides n_plies and fiber_volume_fraction from the dataset.
+    Selects the closest preset from ``MATERIALS`` based on fiber/matrix, then
+    overrides ``n_plies`` and ``fiber_volume_fraction`` from the dataset.
+
+    Behaviour as of issue #34: a missing (fiber, matrix) entry in
+    ``_FIBER_MATRIX_TO_PRESET`` is now always a hard ``KeyError`` — the prior
+    silent fallback to ``'T700_epoxy'`` masked at least three material
+    mismatches (AS4/3501-6, HTA/EHkF420, generic Carbon/epoxy) that
+    systematically inflated the reported MAE on Ghiorse_1993 and similar
+    datasets.  Callers wanting different physics should pass an explicit
+    ``MaterialProperties`` instance, or add a preset+mapping entry.
 
     Parameters
     ----------
     dataset:
         A validated dataset dict containing a ``'material'`` block.
     strict:
-        If ``True``, raise a ``KeyError`` when the (fiber, matrix) pair is not
-        found in ``_FIBER_MATRIX_TO_PRESET`` instead of falling back to the
-        default preset.  Useful for CI checks that want to catch new materials
-        that have not yet been mapped.
+        Retained for backward compatibility.  As of #34 the function raises
+        ``KeyError`` on an unknown ``(fiber, matrix)`` pair regardless of
+        this flag; ``strict=False`` is therefore a no-op and is kept only so
+        existing call sites do not break.
 
     Raises
     ------
     KeyError
-        Only when *strict* is ``True`` and the (fiber, matrix) key is absent.
+        When the ``(fiber, matrix)`` pair is not present in
+        ``_FIBER_MATRIX_TO_PRESET``.  The message names the dataset, the
+        missing key, and the available presets so the fix is mechanical:
+        add a ``MATERIALS`` entry in ``porosity_fe_analysis.py`` and map it
+        in ``_FIBER_MATRIX_TO_PRESET``.
     """
     m = dataset['material']
     key = (m['fiber'], m['matrix'])
-    dataset_name = dataset.get('reference', str(key))
     if key not in _FIBER_MATRIX_TO_PRESET:
-        msg = (
-            f"Unknown (fiber, matrix) combination {key!r} in dataset "
-            f"{dataset_name!r}; falling back to default preset 'T700_epoxy'. "
-            "Add this combination to _FIBER_MATRIX_TO_PRESET to silence this warning."
+        dataset_name = dataset.get('reference', str(key))
+        raise KeyError(
+            f"No material preset for (fiber={key[0]!r}, matrix={key[1]!r}) "
+            f"in dataset {dataset_name!r}. Add an entry to "
+            f"validation.validate_all._FIBER_MATRIX_TO_PRESET, or supply a "
+            f"custom MaterialProperties. Available presets: "
+            f"{sorted(MATERIALS)}."
         )
-        if strict:
-            raise KeyError(msg)
-        warnings.warn(msg, UserWarning, stacklevel=2)
-        logger.warning(msg)
-    preset_name = _FIBER_MATRIX_TO_PRESET.get(key, 'T700_epoxy')
+    preset_name = _FIBER_MATRIX_TO_PRESET[key]
     base = MATERIALS[preset_name]
     return dataclasses.replace(
         base,

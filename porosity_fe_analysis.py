@@ -370,6 +370,41 @@ MATERIALS = {
         matrix_modulus=3800.0, matrix_poisson=0.38,
         fiber_modulus=240000.0, fiber_volume_fraction=0.60,
     ),
+    # AS4/3501-6 (Hercules/Hexcel) — an IM-class carbon/untoughened epoxy
+    # system. Nominal lamina properties from Soden, Hinton & Kaddour
+    # (Worldwide Failure Exercise, WWFE-I, Compos. Sci. Technol. 1998/2002)
+    # and Daniel & Ishai, "Engineering Mechanics of Composite Materials"
+    # (2nd ed., 2006, Table A.4). 3501-6 neat-resin modulus from Hexcel
+    # technical datasheet (E_m ≈ 4.27 GPa, nu_m ≈ 0.34). AS4 fibre modulus
+    # from Hexcel HexTow AS4 datasheet (E_f ≈ 235 GPa). Used for Ghiorse 1993
+    # (AS4/3501-6 unidirectional) and Jeong 1997 (AS4 fabric/3501-6).
+    'AS4_3501_6_epoxy': MaterialProperties(
+        E11=142000.0, E22=10300.0, E33=10300.0,
+        G12=7200.0, G13=7200.0, G23=3800.0,
+        nu12=0.27, nu13=0.27, nu23=0.40,
+        sigma_1c=1440.0, sigma_1t=2280.0, sigma_2t=57.0, sigma_2c=228.0,
+        tau_12=71.0, tau_ilss=95.0,
+        t_ply=0.125, n_plies=24,
+        matrix_modulus=4270.0, matrix_poisson=0.34,
+        fiber_modulus=235000.0, fiber_volume_fraction=0.60,
+    ),
+    # HTA 24k / EHkF 420 epoxy — Tenax HTA (Toho Tenax) high-tenacity
+    # carbon fibre with a toughened aerospace epoxy system. Lamina
+    # properties from the Stamopoulos et al. (2016) baseline tabulation and
+    # the Tenax HTA fibre datasheet (E_f ≈ 238 GPa). The matrix modulus
+    # (E_m ≈ 3.4 GPa, nu_m ≈ 0.35) is a typical aerospace toughened-epoxy
+    # value used in the absence of an EHkF 420 datasheet entry. Strengths
+    # are scaled to a standard HTA/epoxy unidirectional with Vf ≈ 0.60.
+    'HTA_EHkF420_epoxy': MaterialProperties(
+        E11=130000.0, E22=9000.0, E33=9000.0,
+        G12=4500.0, G13=4500.0, G23=3200.0,
+        nu12=0.32, nu13=0.32, nu23=0.42,
+        sigma_1c=1200.0, sigma_1t=2100.0, sigma_2t=60.0, sigma_2c=200.0,
+        tau_12=70.0, tau_ilss=75.0,
+        t_ply=0.127, n_plies=16,
+        matrix_modulus=3400.0, matrix_poisson=0.35,
+        fiber_modulus=238000.0, fiber_volume_fraction=0.60,
+    ),
 }
 
 # ============================================================

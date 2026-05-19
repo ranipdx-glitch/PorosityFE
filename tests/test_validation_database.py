@@ -278,13 +278,16 @@ def test_liu_2006_validation_matches_existing():
 
 
 # ---------------------------------------------------------------------------
-# Issue #34 — Unknown material mapping fires a UserWarning
+# Issue #34 — Unknown material mapping is a hard KeyError, not a silent
+# fallback to T700_epoxy. The prior silent default masked at least three
+# material mismatches (AS4/3501-6, HTA/EHkF420, generic Carbon/epoxy) in the
+# shipped validation datasets and inflated the reported MAE.
 # ---------------------------------------------------------------------------
 
-def test_resolve_material_warns_on_unknown_fiber_matrix():
-    """Unknown (fiber, matrix) should emit a UserWarning with the missing key
-    and fall back to the default preset rather than silently proceeding."""
-    import warnings
+def test_resolve_material_raises_on_unknown_fiber_matrix():
+    """Unknown (fiber, matrix) must raise KeyError with the missing key, the
+    dataset name, and the list of available presets — never silently fall
+    back to a default preset."""
     from validation.validate_all import resolve_material
 
     dataset = {
@@ -297,27 +300,20 @@ def test_resolve_material_warns_on_unknown_fiber_matrix():
         }
     }
 
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter('always')
-        mat = resolve_material(dataset)
-        # At least one UserWarning should have been raised
-        user_warnings = [x for x in w if issubclass(x.category, UserWarning)]
-        assert len(user_warnings) >= 1, (
-            "Expected a UserWarning for unknown (fiber, matrix) but got none"
-        )
-        msg = str(user_warnings[0].message)
-        assert 'UnknownFiberXYZ' in msg, f"Warning did not mention fiber: {msg}"
-        assert 'UnknownMatrixABC' in msg, f"Warning did not mention matrix: {msg}"
-        assert 'fake_unknown_2099' in msg, f"Warning did not mention dataset name: {msg}"
-
-    # Fallback should still return a valid MaterialProperties object
-    assert mat is not None
-    assert mat.n_plies == 8
-    assert abs(mat.fiber_volume_fraction - 0.55) < 1e-6
+    with pytest.raises(KeyError) as exc_info:
+        resolve_material(dataset)
+    msg = str(exc_info.value)
+    assert 'UnknownFiberXYZ' in msg, f"KeyError did not mention fiber: {msg}"
+    assert 'UnknownMatrixABC' in msg, f"KeyError did not mention matrix: {msg}"
+    assert 'fake_unknown_2099' in msg, f"KeyError did not mention dataset name: {msg}"
+    # The error message should also point the caller at the fix.
+    assert '_FIBER_MATRIX_TO_PRESET' in msg or 'MaterialProperties' in msg
 
 
-def test_resolve_material_strict_raises_on_unknown():
-    """strict=True should raise KeyError instead of warning and falling back."""
+def test_resolve_material_strict_kwarg_is_backward_compatible():
+    """The ``strict`` kwarg is retained as a no-op for backward compatibility
+    (issue #34 made the loud KeyError unconditional). Passing strict=False
+    must still raise on an unknown (fiber, matrix) pair."""
     from validation.validate_all import resolve_material
 
     dataset = {
@@ -329,10 +325,10 @@ def test_resolve_material_strict_raises_on_unknown():
             'n_plies': 8,
         }
     }
-
-    import pytest
     with pytest.raises(KeyError, match='UnknownFiberXYZ'):
         resolve_material(dataset, strict=True)
+    with pytest.raises(KeyError, match='UnknownFiberXYZ'):
+        resolve_material(dataset, strict=False)
 
 
 def test_resolve_material_no_warning_for_known_fiber_matrix():
@@ -357,6 +353,55 @@ def test_resolve_material_no_warning_for_known_fiber_matrix():
         assert len(user_warnings) == 0, (
             f"Unexpected UserWarning for known material: {[str(x.message) for x in user_warnings]}"
         )
+
+
+def test_resolve_material_as4_3501_uses_dedicated_preset():
+    """Ghiorse_1993 / Jeong_1997 materials (AS4/3501-6) must now resolve to
+    the dedicated AS4_3501_6_epoxy preset, not silently fall back to T700
+    (issue #34). AS4 is an IM-class fibre with higher E11 than T700."""
+    from validation.validate_all import resolve_material
+
+    for fiber in ('AS4', 'AS4 fabric'):
+        dataset = {
+            'reference': f'{fiber.lower().replace(" ", "_")}_test',
+            'material': {
+                'fiber': fiber,
+                'matrix': '3501-6 epoxy',
+                'fiber_volume_fraction': 0.60,
+                'n_plies': 32,
+            }
+        }
+        mat = resolve_material(dataset)
+        # AS4/3501-6 E11 is ~142 GPa (significantly above T700's 132 GPa).
+        assert 138000 <= mat.E11 <= 148000, (
+            f"AS4/3501-6 should map to AS4_3501_6_epoxy with E11≈142 GPa, "
+            f"got {mat.E11}"
+        )
+
+
+def test_resolve_material_hta_uses_dedicated_preset():
+    """Stamopoulos_2016 material (HTA 24k / EHkF 420) must now resolve to
+    the dedicated HTA_EHkF420_epoxy preset, not silently fall back to T700
+    (issue #34)."""
+    from validation.validate_all import resolve_material
+
+    dataset = {
+        'reference': 'hta_test',
+        'material': {
+            'fiber': 'HTA 24k',
+            'matrix': 'EHkF 420 epoxy',
+            'fiber_volume_fraction': 0.60,
+            'n_plies': 16,
+        }
+    }
+    mat = resolve_material(dataset)
+    # HTA/EHkF420 fibre modulus is ~238 GPa (Toho Tenax HTA datasheet),
+    # distinct from T700 (~230 GPa) and AS4 (~235 GPa). Sanity-check via
+    # the preset's named fiber_modulus rather than the lamina E11.
+    assert 236000 <= mat.fiber_modulus <= 240000, (
+        f"HTA/EHkF420 should map to HTA_EHkF420_epoxy with E_f≈238 GPa, "
+        f"got {mat.fiber_modulus}"
+    )
 
 
 # ---------------------------------------------------------------------------
