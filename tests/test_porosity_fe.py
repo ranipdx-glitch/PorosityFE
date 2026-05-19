@@ -1535,10 +1535,18 @@ class TestGlobalAssembler:
         assert K.shape == (self.mesh.n_dof, self.mesh.n_dof)
 
     def test_assemble_stiffness_symmetric(self):
+        # Issue #57: K is now explicitly symmetrized at the per-element
+        # cache layer, so K = K^T should hold to machine precision rather
+        # than the prior atol=1e-2 slop.
         assembler = GlobalAssembler(self.mesh, self.material, self.pf)
         K = assembler.assemble_stiffness()
         K_dense = K.toarray()
-        np.testing.assert_allclose(K_dense, K_dense.T, atol=1e-2)
+        max_K = float(np.max(np.abs(K_dense)))
+        max_asym = float(np.max(np.abs(K_dense - K_dense.T)))
+        assert max_asym < 1e-10 * max_K, (
+            f"K not symmetric: max|K-K.T| = {max_asym:.4e}, "
+            f"max|K| = {max_K:.4e}"
+        )
 
     def test_assemble_stiffness_sparse(self):
         assembler = GlobalAssembler(self.mesh, self.material, self.pf)
@@ -2015,6 +2023,103 @@ class TestFESolver:
         # Short-beam geometry: bending stress also exists, but tau_xz should
         # be a non-trivial fraction of the total stress field.
         assert max_tau_xz > 1e-6 * max(max_sigma_xx, 1.0)
+
+
+class TestFESolverIterative:
+    """Regression tests for the iterative solver path and K-symmetrization
+    added in issue #57.
+
+    Coverage:
+      * CG converges to the same displacement field as the direct LU
+        solve (within iterative tolerance).
+      * MINRES likewise.
+      * Assembled K is symmetric to machine precision.
+      * Unknown solver names raise a clear ValueError.
+      * An unreachable tolerance triggers the non-convergence guard.
+    """
+
+    def setup_method(self):
+        self.material = MATERIALS['T800_epoxy']
+        self.pf = PorosityField(self.material, 0.03, distribution='uniform')
+        # Coarse mesh keeps the iterative tests cheap but still gives the
+        # CG/MINRES iterations something to chew on (n_dof ~ a few hundred).
+        self.mesh = CompositeMesh(self.pf, self.material, nx=3, ny=2, nz=2)
+
+    def test_iterative_cg_matches_direct(self):
+        """CG with Jacobi precond should match spsolve within rtol.
+
+        The penalty-method conditioning (max(diag)/min(diag) ~ 1e9) caps
+        how closely CG/MINRES can match LU on this problem; we accept any
+        agreement at the few-times-1e-5 level (still well within
+        engineering accuracy).
+        """
+        solver_direct = FESolver(self.mesh, self.material, self.pf)
+        r_direct = solver_direct.solve(
+            loading='compression', applied_strain=-0.001, solver='direct',
+        )
+        solver_cg = FESolver(self.mesh, self.material, self.pf)
+        r_cg = solver_cg.solve(
+            loading='compression', applied_strain=-0.001,
+            solver='cg', rtol=1e-14,
+        )
+        # Compare on the dominant component to avoid divide-by-near-zero
+        # noise in the transverse directions.
+        ux_direct = r_direct.displacement[:, 0]
+        ux_cg = r_cg.displacement[:, 0]
+        scale = float(np.max(np.abs(ux_direct)))
+        max_err = float(np.max(np.abs(ux_cg - ux_direct)))
+        assert max_err / max(scale, 1e-30) < 1e-4, (
+            f"CG vs direct max|du|/max|u| = {max_err / max(scale, 1e-30):.4e}"
+        )
+
+    def test_minres_matches_direct(self):
+        """MINRES should also match spsolve within rtol."""
+        solver_direct = FESolver(self.mesh, self.material, self.pf)
+        r_direct = solver_direct.solve(
+            loading='compression', applied_strain=-0.001, solver='direct',
+        )
+        solver_minres = FESolver(self.mesh, self.material, self.pf)
+        r_minres = solver_minres.solve(
+            loading='compression', applied_strain=-0.001,
+            solver='minres', rtol=1e-14,
+        )
+        ux_direct = r_direct.displacement[:, 0]
+        ux_mr = r_minres.displacement[:, 0]
+        scale = float(np.max(np.abs(ux_direct)))
+        max_err = float(np.max(np.abs(ux_mr - ux_direct)))
+        assert max_err / max(scale, 1e-30) < 1e-4, (
+            f"MINRES vs direct max|du|/max|u| = "
+            f"{max_err / max(scale, 1e-30):.4e}"
+        )
+
+    def test_stiffness_matrix_is_symmetric(self):
+        """K = K^T to machine precision after symmetrization (issue #57)."""
+        assembler = GlobalAssembler(self.mesh, self.material, self.pf)
+        K = assembler.assemble_stiffness()
+        K_dense = K.toarray()
+        max_K = float(np.max(np.abs(K_dense)))
+        max_asym = float(np.max(np.abs(K_dense - K_dense.T)))
+        assert max_asym < 1e-10 * max_K, (
+            f"K not symmetric: max|K-K.T| = {max_asym:.4e}, "
+            f"max|K| = {max_K:.4e}"
+        )
+
+    def test_invalid_solver_raises(self):
+        """Unsupported solver names should fail loudly."""
+        solver = FESolver(self.mesh, self.material, self.pf)
+        with pytest.raises(ValueError, match="Unknown solver"):
+            solver.solve(
+                loading='compression', applied_strain=-0.001, solver='gmres',
+            )
+
+    def test_cg_nonconvergence_raises(self):
+        """An impossibly-tight tolerance should raise RuntimeError."""
+        solver = FESolver(self.mesh, self.material, self.pf)
+        with pytest.raises(RuntimeError, match="failed to converge"):
+            solver.solve(
+                loading='compression', applied_strain=-0.001,
+                solver='cg', rtol=1e-30,
+            )
 
 
 class TestILSSBeamTheoryValidation:
