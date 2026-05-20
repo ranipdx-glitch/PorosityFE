@@ -32,7 +32,9 @@ jobs:
       run: ruff check .
 
     - name: Mypy
-      run: mypy porosity_fe_analysis.py
+      # Post-#119 the implementation lives in porosity_fe/; the legacy
+      # `porosity_fe_analysis.py` is now a 62-line shim. Check the package.
+      run: mypy porosity_fe porosity_fe_analysis.py
 
   test:
     runs-on: ${{ matrix.os }}

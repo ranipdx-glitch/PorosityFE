@@ -130,10 +130,12 @@ class EmpiricalSolver:
         # Compute layup-dependent scaling
         self.f_md = self._matrix_dominated_fraction(ply_angles_resolved)
 
-        # Build scaled coefficient dicts
-        self.JUDD_WRIGHT_ALPHA = {}
-        self.POWER_LAW_N = {}
-        self.LINEAR_BETA = {}
+        # Build scaled coefficient dicts. Explicit annotations let static
+        # checkers narrow `self.JUDD_WRIGHT_ALPHA[mode]` etc. to `float`
+        # at the vectorized call sites in `apply_loading` (#114/#115).
+        self.JUDD_WRIGHT_ALPHA: Dict[str, float] = {}
+        self.POWER_LAW_N: Dict[str, float] = {}
+        self.LINEAR_BETA: Dict[str, float] = {}
         for mode in ['compression', 'tension', 'shear', 'ilss',
                      'transverse_tension']:
             s = self._layup_scale(mode)
@@ -460,6 +462,10 @@ class EmpiricalSolver:
         # (4400-element typical mesh). User-supplied callables still get the
         # scalar path so the (Vp, mode) -> float contract from #62 holds.
         Vp_arr = self.mesh.porosity
+        # Mesh.porosity is None before `generate_mesh()` runs; the solver
+        # never gets that far without it, but narrow the type explicitly so
+        # static checkers can see the vectorized branches are well-typed.
+        assert Vp_arr is not None, "CompositeMesh.porosity not populated"
         if isinstance(model, str):
             # Mode validation already done above; this picks built-ins or
             # raises a clear error before we touch the array.
