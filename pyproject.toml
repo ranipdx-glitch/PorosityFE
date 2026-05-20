@@ -72,7 +72,7 @@ porosity-analyze = "porosity_fe_analysis:main"
 
 [tool.setuptools]
 py-modules = ["porosity_fe_analysis", "app", "validate_porosity_cli"]
-packages = ["validation"]
+packages = ["porosity_fe", "porosity_fe.fe", "validation"]
 
 [tool.setuptools.package-data]
 validation = ["datasets/*.json", "schemas/*.json"]
