@@ -119,13 +119,19 @@ def test_numpy_default_handler_round_trips_ndarray(tmp_path):
     """An ndarray smuggled into a config dict must serialise via
     _json_default rather than raise TypeError (#20 item 4)."""
     results = _tiny_results()
-    entry = dict(results["uniform_spherical"])
-    entry["config"] = {
-        **entry["config"],
-        "ply_angles_deg": np.array([0.0, 45.0, -45.0, 90.0]),
-        "n_plies_np": np.int64(12),
-    }
-    results = {"uniform_spherical": entry}
+    # #44: compare_configurations now returns ConfigResult dataclasses, so
+    # mutate via dataclasses.replace rather than dict() (the dict-protocol
+    # shim drops the live-object keys and would break save_results_to_json).
+    original = results["uniform_spherical"]
+    replacement = dataclasses.replace(
+        original,
+        config={
+            **original.config,
+            "ply_angles_deg": np.array([0.0, 45.0, -45.0, 90.0]),
+            "n_plies_np": np.int64(12),
+        },
+    )
+    results = {"uniform_spherical": replacement}
 
     path = str(tmp_path / "with_ndarray.json")
     save_results_to_json(results, path)

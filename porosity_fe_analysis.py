@@ -30,8 +30,9 @@ import os
 import platform
 import subprocess
 import sys
+import warnings
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
@@ -1041,9 +1042,15 @@ class CompositeMesh:
         Number of elements along each axis (defaults
         ``nx=50``, ``ny=20``, ``nz=24``). Each must be a positive
         integer not greater than ``_MAX_ELEMENTS_PER_AXIS`` (10 000).
-    ply_angles : list of float, optional
-        Per-ply orientation in degrees. If shorter than ``n_plies``
-        the list is tiled. ``None`` (default) means all 0 deg plies.
+    ply_angles : list of float or {'QI', 'UD'}, optional
+        Per-ply orientation in degrees, OR a string sentinel — ``'QI'``
+        (default, expands to the 8-ply quasi-isotropic baseline
+        ``[0, 90, 45, -45]_s``) or ``'UD'`` (all-zero unidirectional).
+        Explicit lists shorter than ``n_plies`` are tiled. Passing
+        ``None`` is deprecated and is currently resolved to all-zero
+        plies (the historical default) with a
+        :class:`DeprecationWarning` (#44 item 2); this back-compat path
+        will be removed in a future major version.
 
     Attributes
     ----------
@@ -1099,6 +1106,16 @@ class CompositeMesh:
     >>> mesh.L_x = 80.0
     >>> mesh.L_y = 25.0
     >>> mesh.generate_mesh()
+
+    Notes
+    -----
+    ``ply_angles`` defaults — ``'QI'`` is the standardised default across
+    :class:`EmpiricalSolver`, :class:`CompositeMesh`, and :class:`FESolver`
+    (#44 item 2). The string sentinels expand to canonical baselines
+    (``'QI'`` -> ``[0, 90, 45, -45]_s``; ``'UD'`` -> all-zero plies);
+    explicit lists pass through unchanged. Pass ``ply_angles='UD'`` to
+    reproduce the pre-#44 behaviour of leaving every element at
+    ``ply_angle = 0``.
     """
 
     # Cap mesh dimensions to prevent accidental memory blowup. A million-element
@@ -1108,7 +1125,7 @@ class CompositeMesh:
 
     def __init__(self, porosity_field: PorosityField, material: MaterialProperties,
                  nx: int = 50, ny: int = 20, nz: int = 24,
-                 ply_angles: Optional[List[float]] = None):
+                 ply_angles: Optional[Union[List[float], str]] = 'QI'):
         for axis_name, value in (('nx', nx), ('ny', ny), ('nz', nz)):
             if not isinstance(value, (int, np.integer)) or value <= 0:
                 raise ValueError(
@@ -1141,7 +1158,11 @@ class CompositeMesh:
         self.ply_angles = None  # Per-element ply orientation angles (degrees)
         self.void_elements = None
 
-        self._input_ply_angles = ply_angles
+        # Resolve the ply_angles sentinel (#44 item 2). ``None`` is the
+        # deprecated path and emits a DeprecationWarning inside
+        # ``_resolve_ply_angles``.
+        self._input_ply_angles = _resolve_ply_angles(
+            ply_angles, none_means='QI', caller='CompositeMesh.ply_angles')
         self.generate_mesh()
 
     def generate_mesh(self):
@@ -1434,6 +1455,312 @@ def check_mesh_quality(mesh: CompositeMesh, verbose: bool = False) -> Dict:
 # SECTION 5: EMPIRICAL SOLVER
 # ============================================================
 
+# ---- API consistency dataclasses (#44) ----
+#
+# These dataclasses unify the previously divergent return shapes from the
+# empirical and FE solvers, and slim the return value of
+# :func:`compare_configurations` so batch loops do not retain heavyweight
+# live objects (mesh / solver / field) when only the headline numbers are
+# needed.
+#
+# Back-compat: callers that historically treated the returned object as a
+# dict (e.g. ``result['failure_stress']``) keep working because each
+# dataclass exposes ``__getitem__`` mapping the old keys to attribute
+# access. New code should prefer attribute access (``result.failure_stress``).
+# The dict shim will be removed in a future major version.
+
+#: Canonical QI baseline layup (8-ply symmetric ``[0/90/45/-45]_s``).
+#: Used to expand the ``ply_angles='QI'`` sentinel (#44 item 2).
+_PLY_ANGLES_QI: Tuple[float, ...] = (0.0, 90.0, 45.0, -45.0, -45.0, 45.0, 90.0, 0.0)
+
+#: Canonical UD baseline (4 plies, all 0 deg). Used to expand the
+#: ``ply_angles='UD'`` sentinel; the FE / empirical scaling only cares about
+#: the angle distribution, so a short list is fine.
+_PLY_ANGLES_UD: Tuple[float, ...] = (0.0, 0.0, 0.0, 0.0)
+
+
+def _resolve_ply_angles(
+    ply_angles: Optional[Union[List[float], Tuple[float, ...], str]],
+    *,
+    none_means: str = 'QI',
+    caller: str = 'ply_angles',
+) -> Optional[List[float]]:
+    """Resolve the ``ply_angles`` sentinel to a concrete list of angles.
+
+    Unifies the three previously divergent ``ply_angles=None`` defaults
+    across :class:`EmpiricalSolver`, :class:`CompositeMesh` and
+    :class:`FESolver` (#44 item 2). The resolved value is:
+
+    - ``'QI'`` -> ``[0, 90, 45, -45, -45, 45, 90, 0]`` (8-ply symmetric
+      quasi-isotropic). The standardised default for new code.
+    - ``'UD'`` -> ``[0, 0, 0, 0]`` (unidirectional).
+    - A list / tuple of floats -> returned verbatim (as a list).
+    - ``None`` -> resolved to ``none_means`` (default ``'QI'``) and emits a
+      :class:`DeprecationWarning`. Class-specific call sites override
+      ``none_means`` if they need to preserve the prior class-specific
+      default during the deprecation window.
+
+    Returns
+    -------
+    list of float or None
+        ``None`` is returned for :class:`CompositeMesh`'s historical
+        ``None`` -> all-zero behaviour when ``none_means='UD_legacy'``; the
+        empirical / FE paths always get an explicit list back.
+    """
+    if isinstance(ply_angles, str):
+        key = ply_angles.upper()
+        if key == 'QI':
+            return list(_PLY_ANGLES_QI)
+        if key == 'UD':
+            return list(_PLY_ANGLES_UD)
+        raise ValueError(
+            f"{caller} string sentinel must be 'QI' or 'UD', got {ply_angles!r}."
+        )
+    if ply_angles is None:
+        # Back-compat shim — emit a DeprecationWarning and resolve to the
+        # standardised default. Planned removal in a future major version.
+        warnings.warn(
+            f"Passing {caller}=None is deprecated; pass {none_means!r} (or "
+            f"'UD', or an explicit list of ply angles) instead. None is "
+            f"resolved to {none_means!r} for back-compat and will be removed "
+            "in a future major version (#44).",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        if none_means == 'QI':
+            return list(_PLY_ANGLES_QI)
+        if none_means == 'UD':
+            return list(_PLY_ANGLES_UD)
+        # 'UD_legacy' preserves the historical "None means literal zero array"
+        # behaviour for CompositeMesh — same as 'UD' angle-wise.
+        if none_means == 'UD_legacy':
+            return None
+        raise ValueError(
+            f"Internal: unsupported none_means={none_means!r}."
+        )
+    # Concrete sequence — convert to list of floats for hashability /
+    # reproducibility and validate entries.
+    angle_list = [float(a) for a in ply_angles]
+    return angle_list
+
+
+@dataclass
+class FailureResult:
+    """Unified failure-load summary returned by empirical and FE solvers.
+
+    Adds API consistency across :meth:`EmpiricalSolver.get_failure_load`
+    (historically dict-returning) and :meth:`FESolver.solve` (returns the
+    richer :class:`FieldResults`, distilled here via
+    :meth:`FieldResults.summary`). Callers can now treat the two solvers
+    polymorphically (#44 item 1).
+
+    Attributes
+    ----------
+    failure_stress : float
+        Failure stress magnitude in MPa. For the empirical solver this is
+        ``knockdown * sigma_pristine`` at the specimen-average ``Vp``; for
+        the FE solver (distilled via :meth:`FieldResults.summary`) it is
+        ``knockdown * sigma_pristine`` evaluated with the loading-mode-
+        specific pristine strength. Reported as a positive magnitude
+        regardless of loading sign (compression strengths are stored as
+        positive numbers in :class:`MaterialProperties`).
+    knockdown : float
+        Knockdown factor in ``(0, 1]``. Same definition the source solver
+        used; bit-identical to what the legacy dict / float returns
+        produced.
+    model : str
+        Knockdown model label (``'judd_wright'`` / ``'power_law'`` /
+        ``'linear'`` / ``'user_callable'`` for the empirical solver, and
+        ``'fe_<criterion>'`` for the FE solver's summary).
+    details : dict
+        Free-form solver-specific extras (e.g. ``'critical_location'`` for
+        the empirical path, or ``'max_failure_index'`` /
+        ``'failure_criterion'`` from the FE solver). Always JSON-friendly.
+
+    Notes
+    -----
+    Back-compat: callers that historically accessed
+    ``result['failure_stress']`` / ``result['knockdown']`` / ``result['model']``
+    / ``result['critical_location']`` keep working via the ``__getitem__``
+    shim below. The shim maps the four documented dict keys to attribute /
+    ``details`` access; any other key raises :class:`KeyError`. New code
+    should use attribute access. The dict shim will be removed in a future
+    major version.
+    """
+    failure_stress: float
+    knockdown: float
+    model: str
+    details: dict = field(default_factory=dict)
+
+    # Dict keys served by the back-compat shim. ``critical_location`` is
+    # routed through ``details`` because not every distilled FailureResult
+    # has a meaningful crack location (the FE summary uses a max-FI
+    # element index instead).
+    _DICT_KEYS_DIRECT = ('failure_stress', 'knockdown', 'model')
+
+    def __getitem__(self, key: str):
+        """Back-compat dict-style access (deprecated; will be removed)."""
+        if key in self._DICT_KEYS_DIRECT:
+            return getattr(self, key)
+        if key in self.details:
+            return self.details[key]
+        raise KeyError(
+            f"{key!r} is not a known FailureResult field. "
+            f"Known: {sorted(set(self._DICT_KEYS_DIRECT) | set(self.details))}."
+        )
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._DICT_KEYS_DIRECT or key in self.details
+
+    def get(self, key: str, default=None):
+        """Dict-style :meth:`dict.get` for the back-compat shim."""
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def keys(self):
+        """Iterable of known dict-style keys (back-compat shim)."""
+        return list(self._DICT_KEYS_DIRECT) + list(self.details.keys())
+
+    def to_dict(self) -> dict:
+        """Return a plain dict matching the legacy
+        :meth:`EmpiricalSolver.get_failure_load` return shape."""
+        out = {k: getattr(self, k) for k in self._DICT_KEYS_DIRECT}
+        out.update(self.details)
+        return out
+
+
+@dataclass
+class ConfigArtifacts:
+    """Live solver objects retained for one configuration in a sweep.
+
+    Returned in the second slot of the :func:`compare_configurations` tuple
+    when ``return_artifacts=True``. Keeping these out of the default
+    :class:`ConfigResult` lets batch loops over many sweeps hold only the
+    headline numbers in memory (#44 item 3).
+
+    Attributes
+    ----------
+    mesh : CompositeMesh
+        The mesh used for the empirical / FE solves.
+    empirical_solver : EmpiricalSolver
+        The empirical solver constructed for this configuration.
+    porosity_field : PorosityField
+        The porosity field used for this configuration.
+    field_results : FieldResults or None
+        Populated only if the FE solver was run for this configuration
+        (``compare_configurations`` is empirical-only today, so this is
+        ``None`` from that path).
+    """
+    mesh: 'CompositeMesh'
+    empirical_solver: 'EmpiricalSolver'
+    porosity_field: 'PorosityField'
+    field_results: Optional['FieldResults'] = None
+
+
+@dataclass
+class ConfigResult:
+    """Lightweight (numbers-only) per-configuration result from
+    :func:`compare_configurations`.
+
+    Holds only JSON-friendly scalars plus the nested ``empirical`` dict
+    (the headline knockdown / failure_stress tables already produced by
+    :meth:`EmpiricalSolver.get_all_failure_loads`). Heavy live objects
+    (mesh, empirical_solver, porosity_field) are kept on the parallel
+    :class:`ConfigArtifacts` mapping, returned only when
+    ``compare_configurations(..., return_artifacts=True)`` is requested.
+
+    Attributes
+    ----------
+    Vp : float
+        Specimen-average void volume fraction in [0, 1].
+    config_name : str
+        Configuration name (key in :data:`POROSITY_CONFIGS`).
+    config : dict
+        :class:`PorosityField` constructor kwargs for this configuration.
+    failure_stress : float
+        Headline compression failure stress (Judd-Wright model) in MPa.
+        Convenience scalar; the full per-mode/per-model table is on
+        :attr:`empirical`.
+    knockdown : float
+        Headline compression knockdown (Judd-Wright). Convenience scalar.
+    model : str
+        Label of the headline knockdown model. Always ``'judd_wright'``
+        for the default sweep; preserved as a field so future overrides
+        flow through.
+    empirical : dict
+        The nested empirical-knockdown table from
+        :meth:`EmpiricalSolver.get_all_failure_loads`; structure is
+        ``{mode: {model: FailureResult}}``. Kept on the result so the
+        existing JSON exporter, plot helpers, and tests can continue to
+        read ``cfg['empirical']['compression']['judd_wright']['knockdown']``
+        without touching the artifacts dict.
+    seed : int or None
+        The reproducibility seed recorded on the underlying
+        :class:`PorosityField` (mirrors the input to
+        :func:`compare_configurations`). Carried on the lightweight
+        result so the JSON exporter's provenance block can recover it
+        without holding the live ``porosity_field`` (#55 / #44 item 3).
+
+    Notes
+    -----
+    Back-compat: this object supports dict-style item access for the
+    documented keys above (``'Vp'``, ``'config'``, ``'config_name'``,
+    ``'failure_stress'``, ``'knockdown'``, ``'model'``, ``'empirical'``,
+    ``'seed'``) so legacy callers do not break. Any *other* key —
+    notably the legacy ``'mesh'`` / ``'empirical_solver'`` /
+    ``'porosity_field'`` keys — raises :class:`KeyError` with a hint
+    pointing at ``return_artifacts=True``. The dict shim will be removed
+    in a future major version.
+    """
+    Vp: float
+    config_name: str
+    config: dict
+    failure_stress: float
+    knockdown: float
+    model: str
+    empirical: dict
+    seed: Optional[int] = None
+
+    _DICT_KEYS_DIRECT = (
+        'Vp', 'config_name', 'config', 'failure_stress',
+        'knockdown', 'model', 'empirical', 'seed',
+    )
+    # Old keys callers used to find via the dict — surface a helpful
+    # KeyError now that they live on :class:`ConfigArtifacts`.
+    _ARTIFACT_KEYS = ('mesh', 'empirical_solver', 'porosity_field', 'field_results')
+
+    def __getitem__(self, key: str):
+        if key in self._DICT_KEYS_DIRECT:
+            return getattr(self, key)
+        if key in self._ARTIFACT_KEYS:
+            raise KeyError(
+                f"{key!r} is no longer carried on the default "
+                f"compare_configurations result (#44). Re-run with "
+                f"`return_artifacts=True` and read it from the parallel "
+                f"artifacts dict."
+            )
+        raise KeyError(
+            f"{key!r} is not a known ConfigResult field. "
+            f"Known: {sorted(self._DICT_KEYS_DIRECT)}."
+        )
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._DICT_KEYS_DIRECT
+
+    def get(self, key: str, default=None):
+        """Dict-style :meth:`dict.get` for the back-compat shim."""
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def keys(self):
+        """Iterable of known dict-style keys (back-compat shim)."""
+        return list(self._DICT_KEYS_DIRECT)
+
+
 class EmpiricalSolver:
     """Fast analytical solver using empirical porosity-strength models.
 
@@ -1489,24 +1816,56 @@ class EmpiricalSolver:
     _F_MD_FLOOR_ILSS = 0.80  # ILSS / transverse-tension are always matrix-dominated
 
     def __init__(self, mesh: CompositeMesh, material: MaterialProperties,
-                 ply_angles: Optional[List[float]] = None,
+                 ply_angles: Optional[Union[List[float], str]] = 'QI',
                  *,
                  judd_wright_alpha: Optional[Dict[str, float]] = None,
                  power_law_n: Optional[Dict[str, float]] = None,
                  linear_beta: Optional[Dict[str, float]] = None):
         """Empirical knockdown solver.
 
-        ``judd_wright_alpha`` / ``power_law_n`` / ``linear_beta`` are optional
-        partial overrides for the QI-calibrated coefficients (see README
-        "Empirical Strength Knockdown"). Each accepts a dict keyed by mode
-        (``'compression'`` / ``'tension'`` / ``'shear'`` / ``'ilss'``); modes
-        that are absent fall back to the QI defaults. Override values are
-        layup-scaled exactly like the defaults: at ``f_md = 0.5`` the
-        scale is 1.0, so a passed-in ``alpha`` is the value used directly.
+        Parameters
+        ----------
+        mesh : CompositeMesh
+            Mesh whose nodal porosity drives the knockdown.
+        material : MaterialProperties
+            Composite material; supplies pristine strengths.
+        ply_angles : list of float or {'QI', 'UD'}, optional
+            Per-ply orientation in degrees, OR a string sentinel:
+
+            - ``'QI'`` (default) -> ``[0, 90, 45, -45]_s`` quasi-isotropic
+              baseline (``f_md = 0.5``, matches the calibration basis).
+            - ``'UD'`` -> ``[0, 0, 0, 0]`` unidirectional baseline.
+            - explicit list of floats -> used verbatim.
+
+            Passing ``None`` is deprecated and currently resolved to
+            ``'QI'`` with a :class:`DeprecationWarning` (#44 item 2);
+            this back-compat path will be removed in a future major
+            version. ``judd_wright_alpha`` / ``power_law_n`` /
+            ``linear_beta`` are optional partial overrides for the
+            QI-calibrated coefficients (see README "Empirical Strength
+            Knockdown"). Each accepts a dict keyed by mode
+            (``'compression'`` / ``'tension'`` / ``'shear'`` / ``'ilss'``);
+            modes that are absent fall back to the QI defaults. Override
+            values are layup-scaled exactly like the defaults: at
+            ``f_md = 0.5`` the scale is 1.0, so a passed-in ``alpha`` is
+            the value used directly.
+
+        Notes
+        -----
+        ``ply_angles`` defaults — ``'QI'`` is the standardised default
+        across :class:`EmpiricalSolver`, :class:`CompositeMesh`, and
+        :class:`FESolver` (#44 item 2). The string sentinels expand to
+        canonical baselines; explicit lists pass through unchanged.
         """
         self.mesh = mesh
         self.material = material
         self.nodal_knockdown = None
+
+        # Resolve the ply_angles sentinel (#44 item 2). ``None`` is the
+        # deprecated path and emits a DeprecationWarning inside
+        # ``_resolve_ply_angles``.
+        ply_angles_resolved = _resolve_ply_angles(
+            ply_angles, none_means='QI', caller='EmpiricalSolver.ply_angles')
 
         # Resolve coefficient dicts: per-mode merge of class default with override.
         alpha_qi = self._merge_coefficient_override(
@@ -1517,7 +1876,7 @@ class EmpiricalSolver:
             self._LINEAR_BETA_QI, linear_beta, 'linear_beta')
 
         # Compute layup-dependent scaling
-        self.f_md = self._matrix_dominated_fraction(ply_angles)
+        self.f_md = self._matrix_dominated_fraction(ply_angles_resolved)
 
         # Build scaled coefficient dicts
         self.JUDD_WRIGHT_ALPHA = {}
@@ -1785,7 +2144,7 @@ class EmpiricalSolver:
 
     def get_failure_load(self, mode: str = 'compression',
                          model: Union[str, Callable[[float, str], float]]
-                         = 'judd_wright') -> dict:
+                         = 'judd_wright') -> 'FailureResult':
         """Compute failure load using specimen-average porosity.
 
         The knockdown is evaluated at the mean Vp (matching how the original
@@ -1802,6 +2161,17 @@ class EmpiricalSolver:
             ``model(Vp: float, mode: str) -> float ∈ [0, 1]``. User
             callables bypass the layup-scaled coefficient table (the caller
             owns their model).
+
+        Returns
+        -------
+        FailureResult
+            Unified failure summary (#44 item 1) with ``failure_stress``,
+            ``knockdown``, ``model`` attributes plus a ``details`` dict
+            carrying the legacy ``'critical_location'`` extra. Back-compat
+            dict-style access (``result['failure_stress']``,
+            ``result['critical_location']``, etc.) is preserved via the
+            :class:`FailureResult` ``__getitem__`` shim and will be
+            removed in a future major version — prefer attribute access.
         """
         self.apply_loading(mode, model)
         sigma_0 = self._get_pristine_strength(mode)
@@ -1816,12 +2186,15 @@ class EmpiricalSolver:
         model_label = model if isinstance(model, str) else getattr(
             model, '__name__', 'user_callable')
 
-        return {
-            'failure_stress': sigma_0 * mean_kd,
-            'knockdown': mean_kd,
-            'critical_location': [0.0, 0.0, 0.0],
-            'model': model_label,
-        }
+        return FailureResult(
+            failure_stress=float(sigma_0 * mean_kd),
+            knockdown=float(mean_kd),
+            model=str(model_label),
+            details={
+                'critical_location': [0.0, 0.0, 0.0],
+                'mode': mode,
+            },
+        )
 
     def get_all_failure_loads(
             self,
@@ -2137,7 +2510,7 @@ def propagate_uncertainty(void_volume_fraction: float,
                           method: str = 'monte_carlo',
                           seed: Optional[int] = None,
                           percentiles: Tuple[float, ...] = _UQ_DEFAULT_PERCENTILES,
-                          ply_angles: Optional[List[float]] = None,
+                          ply_angles: Optional[Union[List[float], str]] = 'QI',
                           config: Optional[Dict] = None) -> Dict:
     """Propagate input uncertainty through ``EmpiricalSolver.get_failure_load``.
 
@@ -4139,6 +4512,54 @@ class FieldResults:
                 f"max_FI={self.max_failure_index:.4f}, "
                 f"knockdown={self.knockdown:.4f})")
 
+    def summary(self, sigma_pristine: Optional[float] = None,
+                model_label: Optional[str] = None) -> 'FailureResult':
+        """Distill the field result into a :class:`FailureResult`.
+
+        Unifies the FE return shape with the empirical solver (#44 item 1)
+        so callers can treat the two solver outputs polymorphically.
+
+        Parameters
+        ----------
+        sigma_pristine : float, optional
+            Pristine reference stress (MPa) used to compute
+            ``failure_stress = knockdown * sigma_pristine``. If ``None``
+            (default), the ``failure_stress`` field is set to
+            ``knockdown`` itself (unit knockdown — the bare ratio); pass
+            the loading-mode-specific pristine strength
+            (``material.sigma_1c`` for compression, ``material.tau_ilss``
+            for ILSS, etc.) to get a meaningful magnitude.
+        model_label : str, optional
+            Label used for the ``model`` field. Defaults to
+            ``f"fe_{self.failure_criterion}"`` so the FE summary is
+            self-describing and distinguishable from the empirical labels.
+
+        Returns
+        -------
+        FailureResult
+            Unified summary with the FE ``knockdown``, derived
+            ``failure_stress``, FE-criterion-tagged ``model`` and a
+            ``details`` dict carrying ``max_failure_index``,
+            ``failure_criterion`` and ``failure_mode_indices`` for
+            downstream consumers that need the richer field-result data.
+        """
+        kd = float(self.knockdown)
+        sigma_ref = float(sigma_pristine) if sigma_pristine is not None else 1.0
+        return FailureResult(
+            failure_stress=kd * sigma_ref,
+            knockdown=kd,
+            model=str(model_label) if model_label is not None
+            else f"fe_{self.failure_criterion}",
+            details={
+                'max_failure_index': float(self.max_failure_index),
+                'failure_criterion': self.failure_criterion,
+                'failure_mode_indices': (
+                    dict(self.failure_mode_indices)
+                    if self.failure_mode_indices is not None else None
+                ),
+            },
+        )
+
     def to_vtk(self, mesh: 'CompositeMesh', filename: str) -> None:
         """Write the hex mesh and per-element FE fields to a legacy ASCII VTK
         file (``UNSTRUCTURED_GRID``) for inspection in ParaView / VisIt / PyVista.
@@ -4321,8 +4742,29 @@ class FESolver:
         Material properties.
     porosity_field : PorosityField
         Porosity field for stiffness degradation.
-    ply_angles : list or None
-        Optional list of ply angles (degrees). If None, uses mesh defaults.
+    ply_angles : list of float or {'QI', 'UD'}, optional
+        Optional list of ply angles (degrees), OR a string sentinel —
+        ``'QI'`` (default, ``[0, 90, 45, -45]_s``) or ``'UD'`` (all-zero
+        unidirectional). When provided, the resolved angle list is
+        forwarded into the underlying :class:`CompositeMesh` per-element
+        ``ply_angles`` array via :meth:`CompositeMesh.generate_mesh` only
+        if the mesh has not yet been laid up with it — the mesh's
+        ``ply_angles`` field remains the authoritative source for the
+        per-element transformations used during solve. Passing ``None``
+        is deprecated and resolved to ``'QI'`` with a
+        :class:`DeprecationWarning` (#44 item 2).
+
+    Notes
+    -----
+    ``ply_angles`` defaults — ``'QI'`` is the standardised default across
+    :class:`EmpiricalSolver`, :class:`CompositeMesh`, and
+    :class:`FESolver` (#44 item 2). The string sentinels expand to
+    canonical baselines; explicit lists pass through unchanged. The
+    constructor stores the resolved value on ``self.ply_angles`` so
+    callers can introspect what layup the solver was built for; the
+    actual per-element angles used during ``solve()`` come from
+    ``self.mesh.ply_angles``, which is set when the mesh was constructed
+    (passing ``ply_angles`` here does *not* relayup the mesh).
     """
 
     #: Supported failure criteria for :meth:`solve`. Used both at runtime
@@ -4332,13 +4774,20 @@ class FESolver:
 
     def __init__(self, mesh: CompositeMesh, material: MaterialProperties,
                  porosity_field: PorosityField,
-                 ply_angles: Optional[List[float]] = None,
+                 ply_angles: Optional[Union[List[float], str]] = 'QI',
                  failure_criterion: Literal[
                      'tsai_wu', 'hashin', 'max_stress'] = 'tsai_wu') -> None:
         self.mesh = mesh
         self.material = material
         self.porosity_field = porosity_field
-        self.ply_angles = ply_angles
+        # Resolve the ply_angles sentinel (#44 item 2). The resolved value
+        # is stored for introspection; the per-element angles consumed by
+        # solve() come from ``mesh.ply_angles`` (set by the mesh's own
+        # constructor). Previously ``ply_angles`` was stored-but-unused;
+        # documenting the intentional decoupling here so the field has an
+        # explicit contract.
+        self.ply_angles = _resolve_ply_angles(
+            ply_angles, none_means='QI', caller='FESolver.ply_angles')
         self.assembler = GlobalAssembler(mesh, material, porosity_field)
         self.bc_handler = BoundaryHandler(mesh)
         if failure_criterion not in self.SUPPORTED_FAILURE_CRITERIA:
@@ -5194,9 +5643,12 @@ def _analyze_one(Vp: float,
     (#52). Each call is fully independent — no shared mutable state — so
     the result of the parallel execution is order-invariant.
 
-    The returned dict has the exact shape that the existing serial path
-    produces, so the assembly / ranking / plot / JSON code downstream is
-    unchanged.
+    The returned dict carries both the live solver objects (mesh /
+    empirical_solver / porosity_field) and the headline empirical
+    knockdown table; the public-facing :func:`compare_configurations`
+    splits this into :class:`ConfigResult` / :class:`ConfigArtifacts`
+    (#44 item 3). Keeping the worker dict intact preserves the
+    parallel-sweep pickle contract (#52).
 
     Parameters
     ----------
@@ -5239,6 +5691,46 @@ def _analyze_one(Vp: float,
     return (Vp, name, result)
 
 
+def _build_config_result(name: str, Vp: float, raw: Dict) -> 'ConfigResult':
+    """Distill the worker-dict shape into a lightweight :class:`ConfigResult`.
+
+    Reads the headline compression / Judd-Wright knockdown from the inner
+    ``empirical`` table so the convenience scalars on the result match
+    what the existing rankings code prints (#44 item 3). The nested
+    ``empirical`` dict is carried verbatim so existing callers (JSON
+    exporter, plot helpers, tests reading
+    ``cfg['empirical']['compression'][model]['knockdown']``) keep working.
+    """
+    emp = raw['empirical']
+    headline = emp['compression']['judd_wright']
+    # Carry the seed off the PorosityField so the JSON exporter's
+    # provenance block can recover it without holding the live field.
+    pf = raw.get('porosity_field')
+    seed_val = getattr(pf, 'seed', None) if pf is not None else None
+    # Headline is now a FailureResult; the dict-style shim keeps the
+    # legacy ``['failure_stress']`` access working too.
+    return ConfigResult(
+        Vp=float(Vp),
+        config_name=str(name),
+        config=raw['config'],
+        failure_stress=float(headline['failure_stress']),
+        knockdown=float(headline['knockdown']),
+        model=str(headline['model']),
+        empirical=emp,
+        seed=seed_val,
+    )
+
+
+def _build_config_artifacts(raw: Dict) -> 'ConfigArtifacts':
+    """Bundle the live worker objects into a :class:`ConfigArtifacts`."""
+    return ConfigArtifacts(
+        mesh=raw['mesh'],
+        empirical_solver=raw['empirical_solver'],
+        porosity_field=raw['porosity_field'],
+        field_results=raw.get('field_results'),
+    )
+
+
 def _resolve_n_jobs(n_jobs: Optional[int]) -> int:
     """Normalise ``n_jobs`` to a positive worker count.
 
@@ -5256,7 +5748,8 @@ def compare_configurations(void_volume_fraction: float,
                            applied_stress: float = -1500.0,
                            configs: Optional[Dict] = None,
                            seed: Optional[int] = None,
-                           n_jobs: int = 1) -> Dict:
+                           n_jobs: int = 1,
+                           return_artifacts: bool = False):
     """Main analysis function — loops through porosity configurations.
 
     Parameters
@@ -5284,6 +5777,24 @@ def compare_configurations(void_volume_fraction: float,
         ``0`` / ``-1`` / ``None`` resolve to :func:`os.cpu_count`. Results
         are deterministically re-assembled by ``(Vp, name)`` regardless
         of completion order, so the returned dict is independent of ``N``.
+    return_artifacts : bool, optional
+        If ``False`` (default), returns ``Dict[str, ConfigResult]`` —
+        numbers only, JSON-friendly, safe to retain in long batch loops
+        (#44 item 3). If ``True``, returns a tuple
+        ``(Dict[str, ConfigResult], Dict[str, ConfigArtifacts])`` so
+        callers that need the live ``mesh`` / ``empirical_solver`` /
+        ``porosity_field`` objects (plot helpers, the GUI, the
+        ``--plots`` CLI path) can still get them. Existing callers that
+        accessed ``results[name]['mesh']`` need to switch to the
+        artifacts dict; the legacy keys now raise :class:`KeyError` with
+        a hint pointing to ``return_artifacts=True``.
+
+    Returns
+    -------
+    Dict[str, ConfigResult]
+        When ``return_artifacts=False`` (default).
+    Tuple[Dict[str, ConfigResult], Dict[str, ConfigArtifacts]]
+        When ``return_artifacts=True``.
     """
     if material_name not in MATERIALS:
         raise ValueError(
@@ -5352,20 +5863,29 @@ def compare_configurations(void_volume_fraction: float,
 
     # Re-assemble in the original config insertion order so callers see a
     # deterministic dict regardless of which worker finished first.
-    results: Dict[str, Dict] = {}
+    # Split the worker dict into the public-facing lightweight
+    # ConfigResult (numbers + nested empirical table) and the parallel
+    # ConfigArtifacts (live mesh / solver / field), per #44 item 3.
+    results: Dict[str, ConfigResult] = {}
+    artifacts: Dict[str, ConfigArtifacts] = {}
     for name in configs:
-        results[name] = raw_results[(void_volume_fraction, name)]
+        raw = raw_results[(void_volume_fraction, name)]
+        results[name] = _build_config_result(name, void_volume_fraction, raw)
+        artifacts[name] = _build_config_artifacts(raw)
 
     logger.info("\n%s", _bar)
     logger.info("RANKINGS (by compression strength, Judd-Wright)")
     logger.info("%s", _bar)
-    ranked = sorted(results.keys(),
-                   key=lambda c: results[c]['empirical']['compression']['judd_wright']['failure_stress'],
-                   reverse=True)
+    ranked = sorted(
+        results.keys(),
+        key=lambda c: results[c].failure_stress,
+        reverse=True,
+    )
     for i, name in enumerate(ranked, 1):
-        fs = results[name]['empirical']['compression']['judd_wright']['failure_stress']
-        logger.info("  %d. %s: %.1f MPa", i, name, fs)
+        logger.info("  %d. %s: %.1f MPa", i, name, results[name].failure_stress)
 
+    if return_artifacts:
+        return results, artifacts
     return results
 
 
@@ -5463,14 +5983,48 @@ def _build_provenance(seed: Optional[int] = None) -> dict:
     return prov
 
 
-def save_results_to_json(results: Dict, filename: str):
-    """Export numerical results to JSON."""
+def save_results_to_json(results: Dict, filename: str,
+                         artifacts: Optional[Dict[str, 'ConfigArtifacts']] = None):
+    """Export numerical results to JSON.
+
+    Parameters
+    ----------
+    results : dict
+        Either the new ``Dict[str, ConfigResult]`` returned by
+        :func:`compare_configurations`, or the legacy worker-dict shape
+        (``Dict[str, dict]``). Both keep the same on-disk JSON shape so
+        the published JSON schema is unchanged (#44 item 3).
+    filename : str
+        Output JSON path.
+    artifacts : dict, optional
+        Parallel ``Dict[str, ConfigArtifacts]`` from
+        ``compare_configurations(..., return_artifacts=True)``. Used
+        only to recover the seed for the provenance block when
+        ``results`` is the lightweight ``ConfigResult`` shape (no live
+        ``porosity_field`` carried). Optional; the JSON is still written
+        if absent, just with ``seed=None`` in provenance.
+    """
     # All configs in a sweep share one seed; record it iff unambiguous.
-    seeds = {
-        getattr(d.get('porosity_field'), 'seed', None)
-        for d in results.values() if isinstance(d, dict)
-    }
+    # Source the seed from (in priority order):
+    #   1. ConfigResult.seed (the new lightweight path),
+    #   2. the parallel artifacts dict's porosity_field.seed, or
+    #   3. the legacy worker-dict shape (back-compat).
+    # (#44 item 3 / #55).
+    seeds: set = set()
+    for entry in results.values():
+        if isinstance(entry, ConfigResult):
+            if entry.seed is not None or artifacts is None:
+                seeds.add(entry.seed)
+            else:
+                art = artifacts.get(entry.config_name) if artifacts else None
+                pf = getattr(art, 'porosity_field', None) if art is not None else None
+                seeds.add(getattr(pf, 'seed', None))
+        elif isinstance(entry, dict):
+            pf = entry.get('porosity_field')
+            if pf is not None:
+                seeds.add(getattr(pf, 'seed', None))
     seed = seeds.pop() if len(seeds) == 1 else None
+
     output = {
         'schema_version': JSON_SCHEMA_VERSION,
         'format': FORMAT_EMPIRICAL_SWEEP,
@@ -5484,15 +6038,31 @@ def save_results_to_json(results: Dict, filename: str):
                 f"Configuration name {name!r} collides with the JSON "
                 f"envelope keys ('schema_version', 'format')."
             )
+        # Resolve the void_volume_fraction and config dict for both the
+        # legacy dict shape and the new ConfigResult shape. The legacy
+        # path reads ``data['porosity_field'].Vp`` and ``data['config']``;
+        # the new path reads ``data.Vp`` / ``data.config``.
+        if isinstance(data, ConfigResult):
+            vp_value = float(data.Vp)
+            cfg_dict = data.config
+            emp_table = data.empirical
+        else:
+            vp_value = float(data['porosity_field'].Vp)
+            cfg_dict = data['config']
+            emp_table = data['empirical']
+
         entry = {
-            'config': data['config'],
-            'void_volume_fraction': float(data['porosity_field'].Vp),
+            'config': cfg_dict,
+            'void_volume_fraction': vp_value,
             'empirical': {},
         }
-        for mode in data['empirical']:
+        for mode in emp_table:
             entry['empirical'][mode] = {}
-            for model in data['empirical'][mode]:
-                r = data['empirical'][mode][model]
+            for model in emp_table[mode]:
+                r = emp_table[mode][model]
+                # ``r`` is now a FailureResult (with dict-style back-compat
+                # shim) for the empirical path, but legacy callers may
+                # still hand in raw dicts.
                 entry['empirical'][mode][model] = {
                     'failure_stress_MPa': r['failure_stress'],
                     'knockdown': r['knockdown'],
@@ -5762,12 +6332,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     for Vp in args.vp:
         Vp_label = _vp_label(Vp)
         try:
-            results = compare_configurations(
+            # ``return_artifacts=True`` because the --plots path needs the
+            # live mesh / empirical_solver / porosity_field objects for
+            # the FEVisualizer calls below (#44 item 3 migration).
+            results, artifacts = compare_configurations(
                 Vp,
                 material_name=args.material,
                 applied_stress=args.applied_stress,
                 seed=args.seed,
                 n_jobs=args.jobs,
+                return_artifacts=True,
             )
         except ValueError as exc:
             print(f"ERROR: bad input for Vp={Vp}: {exc}", file=sys.stderr)
@@ -5779,21 +6353,22 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         if args.plots:
             for name in results:
+                art = artifacts[name]
                 FEVisualizer.plot_porosity_field(
-                    results[name]['porosity_field'],
+                    art.porosity_field,
                     save_path=os.path.join(
                         output_dir, f"porosity_profile_{name}_{Vp_label}.png"))
                 FEVisualizer.plot_mesh_3d(
-                    results[name]['mesh'],
+                    art.mesh,
                     save_path=os.path.join(
                         output_dir, f"porosity_mesh_3d_{name}_{Vp_label}.png"))
                 FEVisualizer.plot_mesh_detail(
-                    results[name]['mesh'],
+                    art.mesh,
                     save_path=os.path.join(
                         output_dir, f"porosity_mesh_detail_{name}_{Vp_label}.png"))
                 FEVisualizer.plot_damage_contour(
-                    results[name]['mesh'],
-                    results[name]['empirical_solver'],
+                    art.mesh,
+                    art.empirical_solver,
                     save_path=os.path.join(
                         output_dir, f"porosity_damage_{name}_{Vp_label}.png"))
             FEVisualizer.plot_model_comparison(
@@ -5803,7 +6378,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         out_path = os.path.join(
             output_dir, f"porosity_analysis_results_{Vp_label}.json")
-        save_results_to_json(results, out_path)
+        save_results_to_json(results, out_path, artifacts=artifacts)
 
     if args.plots and all_results:
         FEVisualizer.plot_knockdown_curves(
