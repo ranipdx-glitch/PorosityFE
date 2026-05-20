@@ -708,11 +708,17 @@ class TestAnalysisPipeline:
         assert 'uniform_spherical' in results
 
     def test_compare_configurations_has_empirical_solver(self):
-        results = compare_configurations(0.03, configs={'uniform_spherical': POROSITY_CONFIGS['uniform_spherical']})
+        # #44 item 3: lightweight ConfigResult by default; live mesh /
+        # empirical_solver objects live on the parallel artifacts dict
+        # returned only with ``return_artifacts=True``.
+        results, artifacts = compare_configurations(
+            0.03, configs={'uniform_spherical': POROSITY_CONFIGS['uniform_spherical']},
+            return_artifacts=True)
         r = results['uniform_spherical']
         assert 'empirical' in r
-        assert 'mesh' in r
-        assert 'empirical_solver' in r
+        art = artifacts['uniform_spherical']
+        assert art.mesh is not None
+        assert art.empirical_solver is not None
 
     def test_compare_configurations_empirical_has_all_modes(self):
         results = compare_configurations(0.03, configs={'uniform_spherical': POROSITY_CONFIGS['uniform_spherical']})
@@ -851,19 +857,21 @@ class TestResultsSchemaAndReproducibility:
         assert d1 == d2
 
     def test_json_default_handles_numpy_and_ndarray(self, tmp_path):
-        from porosity_fe_analysis import _json_default
+        from porosity_fe_analysis import _json_default, ConfigResult
         assert _json_default(np.float64(1.5)) == 1.5
         assert _json_default(np.int64(7)) == 7
         assert _json_default(np.array([1.0, 2.0])) == [1.0, 2.0]
         # End-to-end: an ndarray smuggled into the payload must not raise.
-        # Replace the nested dicts with shallow copies — `config` aliases the
-        # shared POROSITY_CONFIGS entry, so mutating it in place would poison
-        # global state for other tests.
+        # With #44 the result is a ConfigResult dataclass; mutate a *copy*
+        # of its ``config`` dict so the shared POROSITY_CONFIGS entry is
+        # not poisoned for other tests, then build a fresh dataclass.
         results = self._one_config_results()
-        entry = dict(results['uniform_spherical'])
-        entry['config'] = {**entry['config'],
-                           'ply_angles': np.array([0.0, 90.0, 45.0])}
-        results = {'uniform_spherical': entry}
+        original = results['uniform_spherical']
+        replacement = dataclasses.replace(
+            original,
+            config={**original.config,
+                    'ply_angles': np.array([0.0, 90.0, 45.0])})
+        results = {'uniform_spherical': replacement}
         path = str(tmp_path / "np.json")
         save_results_to_json(results, path)  # would TypeError pre-#20
         with open(path, encoding='utf-8') as f:
@@ -877,9 +885,13 @@ class TestIntegration:
 
     def test_full_pipeline_single_config(self, tmp_path):
         os.chdir(str(tmp_path))
-        results = compare_configurations(
+        # #44 item 3: pull the porosity_field for plotting from the
+        # artifacts dict; the lightweight ConfigResult only carries
+        # numbers and the nested empirical table.
+        results, artifacts = compare_configurations(
             0.03, material_name='T800_epoxy',
-            configs={'uniform_spherical': POROSITY_CONFIGS['uniform_spherical']})
+            configs={'uniform_spherical': POROSITY_CONFIGS['uniform_spherical']},
+            return_artifacts=True)
 
         r = results['uniform_spherical']
         emp_comp = r['empirical']['compression']['judd_wright']
@@ -890,11 +902,12 @@ class TestIntegration:
         emp_comp_kd = r['empirical']['compression']['judd_wright']['knockdown']
         assert emp_ilss < emp_comp_kd
 
-        save_results_to_json(results, "test_output.json")
+        save_results_to_json(results, "test_output.json", artifacts=artifacts)
         assert os.path.exists("test_output.json")
 
-        FEVisualizer.plot_porosity_field(r['porosity_field'],
-                                         save_path="test_profile.png")
+        FEVisualizer.plot_porosity_field(
+            artifacts['uniform_spherical'].porosity_field,
+            save_path="test_profile.png")
         assert os.path.exists("test_profile.png")
         plt.close('all')
 
@@ -1459,8 +1472,11 @@ class TestCompositeMeshFE:
         assert abs(Lx - 50.0) < 1e-10
         assert abs(Ly - 20.0) < 1e-10
 
-    def test_ply_angles_default_zero(self):
-        mesh = CompositeMesh(self.pf, self.material, nx=5, ny=3, nz=4)
+    def test_ply_angles_ud_sentinel_all_zero(self):
+        # #44 item 2: the all-zero behaviour moved from the implicit
+        # default to the explicit 'UD' sentinel.
+        mesh = CompositeMesh(self.pf, self.material, nx=5, ny=3, nz=4,
+                             ply_angles='UD')
         np.testing.assert_allclose(mesh.ply_angles, 0.0)
 
     def test_ply_angles_custom(self):
@@ -2282,6 +2298,130 @@ class TestPenaltyFactorAndConditioning:
         )
 
 
+class TestApiConsistency:
+    """#44: unified FailureResult / ConfigResult dataclasses, 'QI'/'UD'
+    sentinel, slim compare_configurations return."""
+
+    def setup_method(self):
+        from porosity_fe_analysis import FailureResult, ConfigResult, ConfigArtifacts
+        self.FailureResult = FailureResult
+        self.ConfigResult = ConfigResult
+        self.ConfigArtifacts = ConfigArtifacts
+        self.material = MATERIALS['T800_epoxy']
+
+    # --- Item 1: unified return shapes -------------------------------
+
+    def test_failure_result_attribute_and_dict_access(self):
+        """FailureResult must support both `r.failure_stress` and `r['failure_stress']`."""
+        pf = PorosityField(self.material, 0.02, distribution='uniform')
+        mesh = CompositeMesh(pf, self.material, nx=4, ny=2, nz=2,
+                             ply_angles='QI')
+        emp = EmpiricalSolver(mesh, self.material)
+        r = emp.get_failure_load(mode='compression', model='judd_wright')
+        assert isinstance(r, self.FailureResult)
+        # Attribute access.
+        assert hasattr(r, 'failure_stress')
+        assert hasattr(r, 'knockdown')
+        assert hasattr(r, 'model')
+        # Dict-style back-compat shim.
+        assert r['failure_stress'] == r.failure_stress
+        assert r['knockdown'] == r.knockdown
+        assert r['model'] == r.model
+
+    def test_field_results_summary_matches_solver_output(self):
+        """FieldResults.summary() must produce a FailureResult that
+        composes the FE knockdown with the supplied pristine strength."""
+        pf = PorosityField(self.material, 0.03, distribution='uniform')
+        mesh = CompositeMesh(pf, self.material, nx=3, ny=2, nz=2,
+                             ply_angles='UD')
+        fe = FESolver(mesh, self.material, pf)
+        field = fe.solve(loading='compression', applied_strain=-0.001)
+        # Caller supplies the pristine strength (FE solver doesn't carry it).
+        sigma_p = self.material.sigma_1c
+        summary = field.summary(sigma_pristine=sigma_p)
+        assert isinstance(summary, self.FailureResult)
+        assert summary.knockdown == pytest.approx(field.knockdown, rel=1e-12)
+        assert summary.failure_stress == pytest.approx(
+            field.knockdown * sigma_p, rel=1e-12)
+        assert summary.details['max_failure_index'] == pytest.approx(
+            float(field.max_failure_index), rel=1e-12)
+        assert summary.details['failure_criterion'] == field.failure_criterion
+
+    # --- Item 2: 'QI'/'UD' sentinel ----------------------------------
+
+    def test_ply_angles_qi_sentinel(self):
+        """`ply_angles='QI'` must expand to the canonical [0/90/45/-45]_s stack."""
+        pf = PorosityField(self.material, 0.02, distribution='uniform')
+        mesh_qi = CompositeMesh(pf, self.material, nx=4, ny=2, nz=2,
+                                ply_angles='QI')
+        mesh_explicit = CompositeMesh(
+            pf, self.material, nx=4, ny=2, nz=2,
+            ply_angles=[0.0, 90.0, 45.0, -45.0, -45.0, 45.0, 90.0, 0.0])
+        np.testing.assert_allclose(mesh_qi.ply_angles, mesh_explicit.ply_angles)
+
+    def test_ply_angles_ud_sentinel(self):
+        """`ply_angles='UD'` must expand to the all-zero stack."""
+        pf = PorosityField(self.material, 0.02, distribution='uniform')
+        mesh_ud = CompositeMesh(pf, self.material, nx=4, ny=2, nz=2,
+                                ply_angles='UD')
+        np.testing.assert_allclose(mesh_ud.ply_angles, 0.0)
+
+    def test_ply_angles_none_deprecation(self):
+        """Passing ply_angles=None must warn but still resolve to QI."""
+        pf = PorosityField(self.material, 0.02, distribution='uniform')
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            mesh_none = CompositeMesh(pf, self.material, nx=4, ny=2, nz=2,
+                                      ply_angles=None)
+        mesh_qi = CompositeMesh(pf, self.material, nx=4, ny=2, nz=2,
+                                ply_angles='QI')
+        # Resolved to 'QI' for back-compat (compare expanded per-layer arrays).
+        np.testing.assert_allclose(mesh_none.ply_angles, mesh_qi.ply_angles)
+
+    def test_ply_angles_bad_sentinel_raises(self):
+        """An unknown string sentinel must raise a clear ValueError."""
+        pf = PorosityField(self.material, 0.02, distribution='uniform')
+        with pytest.raises(ValueError, match=r"'QI' or 'UD'"):
+            CompositeMesh(pf, self.material, nx=4, ny=2, nz=2,
+                          ply_angles='nonsense')
+
+    # --- Item 3: lightweight compare_configurations return -----------
+
+    def test_compare_configurations_default_returns_lightweight(self):
+        """Default compare_configurations must return Dict[str, ConfigResult]."""
+        results = compare_configurations(
+            0.03, configs={'uniform_spherical':
+                           POROSITY_CONFIGS['uniform_spherical']})
+        assert isinstance(results, dict)
+        for entry in results.values():
+            assert isinstance(entry, self.ConfigResult)
+
+    def test_compare_configurations_return_artifacts(self):
+        """`return_artifacts=True` must return (results, artifacts) tuple."""
+        out = compare_configurations(
+            0.03, configs={'uniform_spherical':
+                           POROSITY_CONFIGS['uniform_spherical']},
+            return_artifacts=True)
+        assert isinstance(out, tuple) and len(out) == 2
+        results, artifacts = out
+        for entry in results.values():
+            assert isinstance(entry, self.ConfigResult)
+        for art in artifacts.values():
+            assert isinstance(art, self.ConfigArtifacts)
+            assert art.mesh is not None
+            assert art.porosity_field is not None
+            assert art.empirical_solver is not None
+
+    def test_config_result_legacy_artifact_keys_raise(self):
+        """Accessing the moved keys via the dict shim must raise a clear KeyError."""
+        results = compare_configurations(
+            0.03, configs={'uniform_spherical':
+                           POROSITY_CONFIGS['uniform_spherical']})
+        r = results['uniform_spherical']
+        for legacy_key in ('mesh', 'empirical_solver', 'porosity_field'):
+            with pytest.raises(KeyError, match="return_artifacts"):
+                _ = r[legacy_key]
+
+
 class TestILSSBeamTheoryValidation:
     """Beam-theory validation for the ILSS short-beam-shear FE BCs.
 
@@ -2460,7 +2600,10 @@ class TestFEExportVTK:
     def _solve(self):
         material = MATERIALS['T800_epoxy']
         pf = PorosityField(material, 0.03, distribution='uniform')
-        mesh = CompositeMesh(pf, material, nx=3, ny=2, nz=2)
+        # #44: pin to UD so the per-element FI stays non-negative; the new
+        # 'QI' default produces a richer multi-axial state that Tsai-Wu can
+        # legitimately return small-negative values for in safe regions.
+        mesh = CompositeMesh(pf, material, nx=3, ny=2, nz=2, ply_angles='UD')
         solver = FESolver(mesh, material, pf)
         results = solver.solve(loading='compression', applied_strain=-0.001)
         return mesh, results
@@ -3541,11 +3684,14 @@ class TestIssue55ProvenanceContract:
 
     def test_seed_threaded_through_compare_configurations(self):
         """seed kwarg lands on every PorosityField the pipeline builds."""
-        results = compare_configurations(
+        # #44 item 3: pull the porosity_field from the artifacts dict
+        # since it's no longer carried on the default ConfigResult.
+        _results, artifacts = compare_configurations(
             0.03, seed=99,
             configs={'uniform_spherical':
-                     POROSITY_CONFIGS['uniform_spherical']})
-        pf = results['uniform_spherical']['porosity_field']
+                     POROSITY_CONFIGS['uniform_spherical']},
+            return_artifacts=True)
+        pf = artifacts['uniform_spherical'].porosity_field
         assert pf.seed == 99
 
 
