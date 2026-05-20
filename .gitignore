@@ -27,6 +27,12 @@ Thumbs.db
 # Pytest
 .pytest_cache/
 
+# Coverage.py artefacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
 # Runtime analysis output (from `porosity-analyze` runs, examples, smoke tests)
 porosity_analysis_results_*.json
 porosity_fe_results_*.json
