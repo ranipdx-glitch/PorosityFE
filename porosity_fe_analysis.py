@@ -33,7 +33,7 @@ import sys
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -2575,7 +2575,7 @@ class EmpiricalSolver:
         model_label = model if isinstance(model, str) else getattr(
             model, '__name__', 'user_callable')
 
-        details = {
+        details: Dict[str, Any] = {
             'critical_location': [0.0, 0.0, 0.0],
             'mode': mode,
         }
@@ -2622,7 +2622,7 @@ class EmpiricalSolver:
         R : float, optional
             Stress ratio for the fatigue knockdown (informational).
         """
-        results: Dict[str, Dict[str, dict]] = {}
+        results: Dict[str, Dict[str, FailureResult]] = {}
         all_models: List[Tuple[str, Union[str, Callable[[float, str], float]]]] = [
             ('judd_wright', 'judd_wright'),
             ('power_law', 'power_law'),
@@ -6005,8 +6005,8 @@ class FESolver:
                                           'failure_criterion', 'tsai_wu')),
                 'mode_indices': (
                     {k: float(v) for k, v in field_results.failure_mode_indices.items()}
-                    if getattr(field_results, 'failure_mode_indices', None)
-                    is not None else None
+                    if field_results.failure_mode_indices is not None
+                    else None
                 ),
                 'knockdown_factor': float(field_results.knockdown),
             },

@@ -19,11 +19,16 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-import matplotlib
+import matplotlib  # noqa: E402
+
 matplotlib.use("Agg")
 
 from porosity_fe_analysis import (  # noqa: E402
-    MATERIALS, CompositeMesh, EmpiricalSolver, FEVisualizer, PorosityField,
+    MATERIALS,
+    CompositeMesh,
+    EmpiricalSolver,
+    FEVisualizer,
+    PorosityField,
     VoidGeometry,
 )
 
@@ -48,10 +53,10 @@ def main() -> None:
     solver = EmpiricalSolver(mesh, material)
     result = solver.get_failure_load(mode="compression", model="judd_wright")
 
-    print(f"Material:        T800_epoxy")
+    print("Material:        T800_epoxy")
     print(f"Vp (background): {pf.Vp * 100:.2f}%   "
           f"({len(voids)} discrete voids on top)")
-    print(f"Discrete voids:")
+    print("Discrete voids:")
     for i, v in enumerate(voids):
         scf = v.stress_concentration_factor()["compression"]
         print(f"  void {i}: center={v.center.tolist()}, "

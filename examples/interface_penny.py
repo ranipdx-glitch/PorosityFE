@@ -20,11 +20,16 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-import matplotlib
+import matplotlib  # noqa: E402
+
 matplotlib.use("Agg")
 
 from porosity_fe_analysis import (  # noqa: E402
-    MATERIALS, CompositeMesh, EmpiricalSolver, FEVisualizer, PorosityField,
+    MATERIALS,
+    CompositeMesh,
+    EmpiricalSolver,
+    FEVisualizer,
+    PorosityField,
 )
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
@@ -42,7 +47,7 @@ def main() -> None:
     res_comp = solver.get_failure_load(mode="compression", model="judd_wright")
 
     z, Vp_z = pf.effective_porosity_profile(nz=400)
-    print(f"Material:           T800_epoxy")
+    print("Material:           T800_epoxy")
     print(f"Vp (mean):          {pf.Vp * 100:.2f}%   (interface, penny)")
     print(f"Vp (peak):          {Vp_z.max() * 100:.2f}%  at z = "
           f"{z[Vp_z.argmax()]:.3f} mm")

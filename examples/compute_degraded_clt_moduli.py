@@ -21,7 +21,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-import matplotlib
+import matplotlib  # noqa: E402
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
@@ -40,10 +41,14 @@ def main() -> None:
     Ex, Ey, Gxy = [], [], []
     for Vp in Vps:
         m = compute_degraded_clt_moduli(material, ply_angles, float(Vp))
-        Ex.append(m["Ex"]); Ey.append(m["Ey"]); Gxy.append(m["Gxy"])
-    Ex = np.array(Ex); Ey = np.array(Ey); Gxy = np.array(Gxy)
+        Ex.append(m["Ex"])
+        Ey.append(m["Ey"])
+        Gxy.append(m["Gxy"])
+    Ex = np.array(Ex)
+    Ey = np.array(Ey)
+    Gxy = np.array(Gxy)
 
-    print(f"Layup: [0/45/-45/90]_s   (8 plies, T800_epoxy)")
+    print("Layup: [0/45/-45/90]_s   (8 plies, T800_epoxy)")
     print(f"{'Vp(%)':>7s} {'Ex/Ex0':>9s} {'Ey/Ey0':>9s} {'Gxy/Gxy0':>11s}")
     for v, ex, ey, g in zip(Vps, Ex / Ex[0], Ey / Ey[0], Gxy / Gxy[0]):
         print(f"{v*100:7.2f} {ex:9.4f} {ey:9.4f} {g:11.4f}")
@@ -55,9 +60,13 @@ def main() -> None:
     ax.set_xlabel("Void volume fraction Vp (%)")
     ax.set_ylabel("Normalized modulus")
     ax.set_title("CLT-degraded laminate moduli vs. porosity")
-    ax.grid(alpha=0.3); ax.legend(); ax.set_ylim(0, 1.05)
+    ax.grid(alpha=0.3)
+    ax.legend()
+    ax.set_ylim(0, 1.05)
     out_png = os.path.join(OUT_DIR, "clt_degraded_moduli.png")
-    fig.tight_layout(); fig.savefig(out_png); plt.close(fig)
+    fig.tight_layout()
+    fig.savefig(out_png)
+    plt.close(fig)
     print(f"PNG saved: {out_png}")
 
 

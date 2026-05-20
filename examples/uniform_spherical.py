@@ -21,11 +21,16 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-import matplotlib
+import matplotlib  # noqa: E402
+
 matplotlib.use("Agg")
 
 from porosity_fe_analysis import (  # noqa: E402
-    MATERIALS, CompositeMesh, EmpiricalSolver, FEVisualizer, PorosityField,
+    MATERIALS,
+    CompositeMesh,
+    EmpiricalSolver,
+    FEVisualizer,
+    PorosityField,
 )
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")

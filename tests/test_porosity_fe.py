@@ -857,7 +857,7 @@ class TestResultsSchemaAndReproducibility:
         assert d1 == d2
 
     def test_json_default_handles_numpy_and_ndarray(self, tmp_path):
-        from porosity_fe_analysis import _json_default, ConfigResult
+        from porosity_fe_analysis import _json_default
         assert _json_default(np.float64(1.5)) == 1.5
         assert _json_default(np.int64(7)) == 7
         assert _json_default(np.array([1.0, 2.0])) == [1.0, 2.0]
