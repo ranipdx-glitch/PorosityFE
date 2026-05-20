@@ -2422,6 +2422,144 @@ class TestApiConsistency:
                 _ = r[legacy_key]
 
 
+class TestEnvironmentalKnockdown:
+    """#59: hygrothermal (T/M) and S-N fatigue knockdown surfaces.
+
+    Threads ``environment=`` / ``cycles=`` / ``R=`` into
+    :meth:`EmpiricalSolver.get_failure_load` and asserts they compose
+    multiplicatively with the existing porosity knockdown.
+    """
+
+    def setup_method(self):
+        from porosity_fe_analysis import FatigueModel, _FATIGUE_B_QI
+        self.FatigueModel = FatigueModel
+        self._FATIGUE_B_QI = _FATIGUE_B_QI
+        # T800/epoxy with hygrothermal calibration: typical aerospace epoxy
+        # T_g_dry ~ 200 deg C. Defaults T_ref = 23 C, M_ref = 0 wt%.
+        self.material = dataclasses.replace(
+            MATERIALS['T800_epoxy'], T_g_dry=200.0,
+        )
+        # Reference material with no hygrothermal calibration (T_g_dry=None)
+        # so the env knockdown is a clean no-op.
+        self.material_no_tg = MATERIALS['T800_epoxy']
+
+    def _make_solver(self, material=None):
+        material = material if material is not None else self.material
+        pf = PorosityField(material, 0.02, distribution='uniform')
+        mesh = CompositeMesh(pf, material, nx=4, ny=2, nz=2,
+                             ply_angles='QI')
+        return EmpiricalSolver(mesh, material), pf, mesh
+
+    # -- Item 1: hygrothermal knockdown --------------------------------
+
+    def test_environment_knockdown_noop_when_unspecified(self):
+        """No ``environment`` kwarg -> factor 1.0, FailureResult unchanged."""
+        solver, _, _ = self._make_solver()
+        base = solver.get_failure_load(mode='ilss', model='judd_wright')
+        env_off = solver.get_failure_load(mode='ilss', model='judd_wright',
+                                          environment=None)
+        assert base.knockdown == pytest.approx(env_off.knockdown, rel=1e-12)
+        assert base.failure_stress == pytest.approx(env_off.failure_stress,
+                                                     rel=1e-12)
+        # ``environment_knockdown`` is only surfaced when active.
+        assert 'environment_knockdown' not in base.details
+        assert 'environment_knockdown' not in env_off.details
+
+    def test_environment_knockdown_matrix_dominated_reduces(self):
+        """Hot/wet conditioning must reduce matrix-dominated allowables."""
+        solver, _, _ = self._make_solver()
+        env = {'T': 80.0, 'M': 1.2}
+        for mode in ('ilss', 'transverse_tension'):
+            base = solver.get_failure_load(mode=mode, model='judd_wright')
+            env_on = solver.get_failure_load(mode=mode, model='judd_wright',
+                                             environment=env)
+            assert env_on.details['environment_knockdown'] < 1.0, mode
+            assert env_on.knockdown < base.knockdown, mode
+            assert env_on.failure_stress < base.failure_stress, mode
+
+    def test_environment_knockdown_fiber_dominated_unaffected(self):
+        """Fiber-dominated 'tension' must see factor 1.0 even hot/wet."""
+        solver, _, _ = self._make_solver()
+        env = {'T': 80.0, 'M': 1.2}
+        env_on = solver.get_failure_load(mode='tension', model='judd_wright',
+                                         environment=env)
+        # Even when ``environment`` is passed, the fiber-dominated mode
+        # gets factor 1.0 from ``environment_knockdown``.
+        assert env_on.details['environment_knockdown'] == pytest.approx(
+            1.0, rel=1e-12)
+
+    def test_environment_knockdown_below_glass_transition_safe(self):
+        """``T_service`` well below dry ``T_g`` -> factor close to 1.0."""
+        solver, _, _ = self._make_solver()
+        # Cool & dry: T = 23 C, M = 0 -> ratio = 1.0 exactly.
+        env_on = solver.get_failure_load(mode='ilss', model='judd_wright',
+                                         environment={'T': 23.0, 'M': 0.0})
+        assert env_on.details['environment_knockdown'] == pytest.approx(
+            1.0, rel=1e-9)
+        # Mildly warm & nearly dry: still close to 1.0.
+        env_mild = solver.get_failure_load(mode='ilss', model='judd_wright',
+                                            environment={'T': 30.0, 'M': 0.1})
+        assert env_mild.details['environment_knockdown'] > 0.95
+
+    # -- Item 2: S-N fatigue knockdown ---------------------------------
+
+    def test_fatigue_knockdown_noop_when_cycles_none(self):
+        """``cycles=None`` -> factor 1.0, no ``fatigue_knockdown`` in details."""
+        solver, _, _ = self._make_solver()
+        base = solver.get_failure_load(mode='compression', model='judd_wright')
+        fat_off = solver.get_failure_load(mode='compression', model='judd_wright',
+                                          cycles=None)
+        assert base.knockdown == pytest.approx(fat_off.knockdown, rel=1e-12)
+        assert 'fatigue_knockdown' not in fat_off.details
+
+    def test_fatigue_knockdown_log_linear_compression(self):
+        """At N=1e6, compression knockdown ~ 1 - b * 6 with the canonical b."""
+        solver, _, _ = self._make_solver()
+        fat = solver.get_failure_load(mode='compression', model='judd_wright',
+                                       cycles=1e6)
+        b = self._FATIGUE_B_QI['compression']
+        expected = 1.0 - b * 6.0
+        assert fat.details['fatigue_knockdown'] == pytest.approx(expected,
+                                                                  rel=1e-9)
+
+    def test_fatigue_knockdown_floor_clamp_emits_warning(self):
+        """At N=1e20 the log-linear extrapolation goes negative -> clamp+warn."""
+        fm = self.FatigueModel()
+        with pytest.warns(UserWarning, match="floor"):
+            kd = fm.knockdown_factor('compression', 1e20)
+        assert kd == pytest.approx(0.01, rel=1e-12)
+
+    # -- Item 3: multiplicative composition ----------------------------
+
+    def test_porosity_environment_fatigue_compose_multiplicatively(self):
+        """All three knockdowns must compose as kd_porosity * kd_env * kd_fat."""
+        solver, _, _ = self._make_solver()
+        # Individual factors from solo runs.
+        kd_porosity_only = solver.get_failure_load(
+            mode='ilss', model='judd_wright').knockdown
+        env = {'T': 80.0, 'M': 1.2}
+        kd_env = solver.get_failure_load(
+            mode='ilss', model='judd_wright',
+            environment=env,
+        ).details['environment_knockdown']
+        kd_fat = solver.get_failure_load(
+            mode='ilss', model='judd_wright',
+            cycles=1e6,
+        ).details['fatigue_knockdown']
+        # Combined: porosity x env x fatigue.
+        combined = solver.get_failure_load(
+            mode='ilss', model='judd_wright',
+            environment=env, cycles=1e6,
+        )
+        expected = kd_porosity_only * kd_env * kd_fat
+        assert combined.knockdown == pytest.approx(expected, rel=1e-9)
+        # Both extras must appear in details so the caller can audit.
+        assert combined.details['environment_knockdown'] == pytest.approx(
+            kd_env, rel=1e-12)
+        assert combined.details['fatigue_knockdown'] == pytest.approx(
+            kd_fat, rel=1e-12)
+
+
 class TestILSSBeamTheoryValidation:
     """Beam-theory validation for the ILSS short-beam-shear FE BCs.
 

@@ -306,6 +306,19 @@ class MaterialProperties:
     fiber_modulus: float          # E_f (MPa)
     fiber_volume_fraction: float  # V_f (pristine)
 
+    # ----------------------------------------------------------------
+    # Hygrothermal conditioning (issue #59).
+    #
+    # All five fields default to "no environmental effect": when any of
+    # ``T_service`` / ``M_service`` / ``T_g_dry`` is ``None``,
+    # :meth:`environment_knockdown` returns 1.0 (back-compat no-op).
+    # ----------------------------------------------------------------
+    T_service: Optional[float] = None   # Service temperature (deg C)
+    M_service: Optional[float] = None   # Service moisture content (wt %)
+    T_ref: float = 23.0                 # Reference / RT (deg C); RTD baseline
+    M_ref: float = 0.0                  # Reference moisture (wt %)
+    T_g_dry: Optional[float] = None     # Dry glass-transition temperature (deg C)
+
     def __post_init__(self):
         # Stiffness moduli must be positive finite (non-zero for 1/E in compliance).
         for name in ('E11', 'E22', 'E33', 'G12', 'G13', 'G23',
@@ -353,6 +366,35 @@ class MaterialProperties:
                 f"MaterialProperties.fiber_volume_fraction must be a fraction in "
                 f"(0, 1), got {self.fiber_volume_fraction!r}. "
                 f"(Pass a fraction such as 0.60, not a percent.)"
+            )
+
+        # Hygrothermal conditioning (issue #59). Optional scalars; reject
+        # only explicit non-finite or nonsensical values so the default
+        # ``None`` no-op path is unaffected.
+        for name in ('T_service', 'M_service', 'T_g_dry'):
+            value = getattr(self, name)
+            if value is not None:
+                if not np.isfinite(float(value)):
+                    raise ValueError(
+                        f"MaterialProperties.{name} must be a finite number or "
+                        f"None, got {value!r}."
+                    )
+        for name in ('T_ref', 'M_ref'):
+            value = getattr(self, name)
+            if not np.isfinite(float(value)):
+                raise ValueError(
+                    f"MaterialProperties.{name} must be a finite number, "
+                    f"got {value!r}."
+                )
+        if self.M_service is not None and float(self.M_service) < 0.0:
+            raise ValueError(
+                f"MaterialProperties.M_service (moisture wt%) must be >= 0, "
+                f"got {self.M_service!r}."
+            )
+        if float(self.M_ref) < 0.0:
+            raise ValueError(
+                f"MaterialProperties.M_ref (moisture wt%) must be >= 0, "
+                f"got {self.M_ref!r}."
             )
 
     @property
@@ -406,6 +448,111 @@ class MaterialProperties:
         C_m[0, 1] = C_m[0, 2] = C_m[1, 0] = C_m[1, 2] = C_m[2, 0] = C_m[2, 1] = lam
         C_m[3, 3] = C_m[4, 4] = C_m[5, 5] = mu
         return C_m
+
+    # Modes whose strength is matrix-/interface-dominated and therefore
+    # sensitive to hygrothermal conditioning. Mirrors the analogous frozenset
+    # on :class:`EmpiricalSolver` but lives here so callers that only have a
+    # ``MaterialProperties`` (no solver) can still query the knockdown.
+    _HYGROTHERMAL_MATRIX_DOMINATED_MODES = frozenset({
+        'transverse_tension', 'ilss', 'shear', 'compression',
+    })
+
+    # Springer / Chamis empirical slope for the dry -> wet shift of the
+    # glass-transition temperature: T_g_wet ~= T_g_dry - 25 * M, with M in
+    # wt% moisture content. See Springer (1981, "Environmental Effects on
+    # Composite Materials") and Chamis (NASA-TM-83320, 1983).
+    _SPRINGER_MOISTURE_TG_SLOPE = 25.0  # deg C per wt% moisture
+
+    def environment_knockdown(self, mode: str,
+                              T: Optional[float] = None,
+                              M: Optional[float] = None) -> float:
+        """Hygrothermal (T / M) knockdown factor for the requested mode.
+
+        Implements the standard Chamis / Springer matrix-property ratio::
+
+            F_env = sqrt((T_g_wet - T) / (T_g_dry - T_ref))
+
+        where ``T_g_wet ~= T_g_dry - 25 * M`` (the Springer rule of thumb
+        for epoxy matrices, with moisture ``M`` in wt%). The square-root
+        form was proposed by Chamis (NASA-TM-83320, 1983) for matrix
+        modulus / strength retention as the service temperature approaches
+        the wet glass transition.
+
+        Fiber-dominated modes (``'tension'``) are largely insensitive to
+        hygrothermal conditioning at engineering relevant temperatures and
+        return ``1.0`` unconditionally. Matrix- and matrix/interface-
+        dominated modes (``'transverse_tension'``, ``'ilss'``, ``'shear'``)
+        get the full Chamis/Springer ratio. ``'compression'`` is
+        treated as matrix-dominated here because fiber microbuckling is
+        gated by matrix shear stiffness — a defensible aerospace-screening
+        choice, but conservative compared to a true fiber-failure mode.
+
+        Parameters
+        ----------
+        mode : str
+            Loading mode name (see
+            :attr:`EmpiricalSolver.PRISTINE_STRENGTH_KEY`).
+        T : float, optional
+            Service temperature in degrees Celsius. Falls back to
+            :attr:`T_service` when ``None``.
+        M : float, optional
+            Service moisture content in wt%. Falls back to
+            :attr:`M_service` when ``None``.
+
+        Returns
+        -------
+        float
+            Multiplicative knockdown in ``(0, 1]``. Returns ``1.0`` (no
+            effect) whenever any of ``T`` / ``M`` / :attr:`T_g_dry` is
+            unspecified — the back-compat no-op path.
+
+        Notes
+        -----
+        This is a screening-level model. Production design allowables
+        should still come from a fully populated test matrix per the
+        applicable spec (e.g. CMH-17 Vol. 2 hygrothermal conditioning).
+        The factor is clamped to ``[0.01, 1.0]`` to keep downstream
+        knockdown composition well-behaved when the service temperature
+        is set extremely close to (or above) the wet ``T_g``.
+        """
+        # Resolve T / M from arguments or attribute defaults. ``None`` from
+        # both sides -> graceful no-op.
+        T_eff = T if T is not None else self.T_service
+        M_eff = M if M is not None else self.M_service
+        if T_eff is None or M_eff is None or self.T_g_dry is None:
+            return 1.0
+
+        # Fiber-dominated modes are insensitive to T / M at engineering
+        # relevant temperatures.
+        if mode not in self._HYGROTHERMAL_MATRIX_DOMINATED_MODES:
+            return 1.0
+
+        T_eff = float(T_eff)
+        M_eff = float(M_eff)
+        T_g_dry = float(self.T_g_dry)
+        T_ref = float(self.T_ref)
+
+        T_g_wet = T_g_dry - self._SPRINGER_MOISTURE_TG_SLOPE * M_eff
+        denom = T_g_dry - T_ref
+        if denom <= 0.0:
+            # Pathological calibration (T_ref above T_g_dry); the matrix is
+            # already above its dry transition at the reference. Refuse to
+            # scale rather than divide by zero.
+            return 1.0
+
+        numer = T_g_wet - T_eff
+        if numer <= 0.0:
+            # Service temperature has reached (or exceeded) the wet T_g —
+            # matrix has effectively lost its load-carrying capability.
+            # Clamp to a small floor so downstream multiplications stay
+            # finite and so callers can spot the regime via the value.
+            return 0.01
+
+        ratio = numer / denom
+        # Square-root form per Chamis; clamp the final factor to <= 1.0 so
+        # cool / dry conditioning (numer > denom) does not synthesise
+        # strength above the RTD allowable.
+        return float(min(np.sqrt(ratio), 1.0))
 
     # Fields a UQ driver is allowed to perturb. Geometry (t_ply, n_plies) and
     # Poisson ratios are excluded by default: the empirical knockdown models
@@ -1761,6 +1908,140 @@ class ConfigResult:
         return list(self._DICT_KEYS_DIRECT)
 
 
+# ============================================================
+# Fatigue (S-N) knockdown surface (issue #59).
+#
+# Log-linear (Mandell) fatigue knockdown::
+#
+#     S_N / S_0 = max(floor, 1 - b * log10(N))
+#
+# with mode-keyed slopes ``b``. The table below is calibrated against
+# representative CFRP S-N data at ``R = 0.1`` (tension-tension): the
+# tension/compression slopes follow the Mandell 1991 review value of
+# b ~ 0.1 per decade for IM-class CFRP; ILSS / matrix-dominated shear
+# is slightly shallower (b ~ 0.08) as reported by Curtis (1989) and the
+# WWFE-III fatigue exercise. These are screening-level values; production
+# allowables should use a fully populated S-N matrix per CMH-17 Vol. 2.
+#
+# References:
+# - Mandell, J. F., "Fatigue Behavior of Fiber-Resin Composites,"
+#   Developments in Reinforced Plastics 2, 1991.
+# - Curtis, P. T., "The fatigue behaviour of fibrous composite materials,"
+#   J. Strain Analysis, 1989.
+# ============================================================
+_FATIGUE_B_QI: Dict[str, float] = {
+    'tension': 0.10,
+    'compression': 0.10,
+    'shear': 0.08,
+    'ilss': 0.08,
+    'transverse_tension': 0.10,
+}
+
+# Floor clamp for the log-linear formula: at very large N the linear
+# extrapolation predicts a negative knockdown. Clamp to 1% of static so
+# downstream multiplications stay well-behaved, and emit a warning so the
+# caller knows they are off the calibration range.
+_FATIGUE_KD_FLOOR = 0.01
+
+
+@dataclass
+class FatigueModel:
+    """S-N (cycles-to-failure) knockdown surface.
+
+    Implements the log-linear (Mandell-style) form::
+
+        S_N / S_0 = max(floor, 1 - b * log10(N))
+
+    where ``b`` is a mode-keyed slope (see :data:`_FATIGUE_B_QI`),
+    ``N`` is the number of load cycles, and ``floor`` (default 0.01)
+    is a small lower clamp that prevents the linear extrapolation from
+    going negative at very large ``N``.
+
+    The default slopes are calibrated for quasi-isotropic CFRP at
+    ``R = 0.1`` (typical tension-tension fatigue). The ``R`` argument is
+    currently informational only — future revisions can wrap the base
+    formula with a Goodman / Walker R-correction.
+
+    Attributes
+    ----------
+    b : dict[str, float], optional
+        Mode-keyed slope override. Modes absent from the override fall
+        back to :data:`_FATIGUE_B_QI`.
+
+    Notes
+    -----
+    For ``cycles = None`` callers should bypass this class entirely (the
+    :meth:`EmpiricalSolver.get_failure_load` path returns ``1.0`` in that
+    case). The model is screening-level; production allowables should
+    come from a fully populated test matrix per the applicable spec
+    (e.g. CMH-17 Vol. 2 fatigue protocols).
+    """
+    b: Optional[Dict[str, float]] = None
+
+    def _slope(self, mode: str) -> float:
+        if mode not in _FATIGUE_B_QI:
+            raise ValueError(
+                f"Unknown fatigue mode {mode!r}. "
+                f"Use one of {sorted(_FATIGUE_B_QI)}."
+            )
+        if self.b is not None and mode in self.b:
+            return float(self.b[mode])
+        return float(_FATIGUE_B_QI[mode])
+
+    def knockdown_factor(self, mode: str, cycles: float,
+                         R: float = 0.1) -> float:
+        """Multiplicative fatigue knockdown for the given mode.
+
+        Parameters
+        ----------
+        mode : str
+            Loading mode (see :data:`_FATIGUE_B_QI`).
+        cycles : float
+            Number of load cycles ``N``. Must be a positive finite
+            value; ``cycles = 1`` corresponds to the static (one-cycle)
+            allowable and returns ``1.0``.
+        R : float, optional
+            Stress ratio ``sigma_min / sigma_max``. Currently
+            informational (default 0.1, tension-tension); reserved
+            for a future Goodman / Walker R-correction.
+
+        Returns
+        -------
+        float
+            Knockdown factor in ``[floor, 1.0]``. When the linear
+            extrapolation would go below the floor (``floor = 0.01``),
+            the value is clamped and a :class:`UserWarning` is emitted.
+        """
+        # Reserved for future R-correction; today it is purely
+        # informational. Validate finiteness so a stray nan can't slip
+        # through silently.
+        if not np.isfinite(float(R)):
+            raise ValueError(
+                f"FatigueModel.knockdown_factor: R must be finite, got {R!r}."
+            )
+
+        N = float(cycles)
+        if not np.isfinite(N) or N < 1.0:
+            raise ValueError(
+                f"FatigueModel.knockdown_factor: cycles must be a finite "
+                f"value >= 1, got {cycles!r}."
+            )
+
+        b = self._slope(mode)
+        raw = 1.0 - b * np.log10(N)
+        if raw < _FATIGUE_KD_FLOOR:
+            warnings.warn(
+                f"Fatigue knockdown for mode={mode!r}, cycles={N:.3g}, "
+                f"R={R!r} extrapolates to {raw:.3g} (<= floor "
+                f"{_FATIGUE_KD_FLOOR}); clamping. The log-linear model is "
+                f"off its calibration range — consider a richer S-N model.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return _FATIGUE_KD_FLOOR
+        return float(min(raw, 1.0))
+
+
 class EmpiricalSolver:
     """Fast analytical solver using empirical porosity-strength models.
 
@@ -2053,6 +2334,50 @@ class EmpiricalSolver:
             )
         return getattr(self.material, self.PRISTINE_STRENGTH_KEY[mode])
 
+    def _environment_knockdown_factor(self, mode: str,
+                                      environment: Optional[Dict[str, float]]
+                                      ) -> float:
+        """Resolve the hygrothermal knockdown factor (issue #59).
+
+        Returns ``1.0`` (back-compat no-op) when ``environment`` is
+        ``None``. Otherwise delegates to
+        :meth:`MaterialProperties.environment_knockdown`, pulling ``T``
+        and ``M`` out of the dict (either key is optional — a missing
+        key falls back to the material's ``T_service`` / ``M_service``).
+        """
+        if environment is None:
+            return 1.0
+        if not isinstance(environment, dict):
+            raise TypeError(
+                f"environment must be a dict (e.g. {{'T': 80.0, 'M': 1.2}}), "
+                f"got {type(environment).__name__}."
+            )
+        allowed_keys = {'T', 'M'}
+        unknown = set(environment) - allowed_keys
+        if unknown:
+            raise ValueError(
+                f"environment has unknown keys {sorted(unknown)}. "
+                f"Use a subset of {sorted(allowed_keys)}."
+            )
+        T = environment.get('T')
+        M = environment.get('M')
+        return float(self.material.environment_knockdown(mode, T=T, M=M))
+
+    def _fatigue_knockdown_factor(self, mode: str,
+                                  cycles: Optional[float],
+                                  R: Optional[float]) -> float:
+        """Resolve the S-N fatigue knockdown factor (issue #59).
+
+        Returns ``1.0`` (back-compat no-op) when ``cycles`` is ``None``.
+        Otherwise instantiates a default :class:`FatigueModel` and
+        evaluates :meth:`FatigueModel.knockdown_factor` at the requested
+        ``cycles`` and ``R`` (``R = 0.1`` if not specified).
+        """
+        if cycles is None:
+            return 1.0
+        R_eff = 0.1 if R is None else float(R)
+        return float(FatigueModel().knockdown_factor(mode, cycles, R_eff))
+
     def _apply_discrete_void_scf(self, base_knockdown: np.ndarray, mode: str) -> np.ndarray:
         kd = base_knockdown.copy()
         for void in self.mesh.porosity_field.discrete_voids:
@@ -2094,12 +2419,19 @@ class EmpiricalSolver:
         return model, True
 
     def apply_loading(self, mode: str = 'compression',
-                      model: Union[str, Callable[[float, str], float]] = 'judd_wright'):
+                      model: Union[str, Callable[[float, str], float]] = 'judd_wright',
+                      *,
+                      cycles: Optional[float] = None,
+                      environment: Optional[Dict[str, float]] = None,
+                      R: Optional[float] = None):
         """Compute per-node knockdown for a given loading mode and model.
 
         Populates ``self.nodal_knockdown`` (shape ``(n_nodes,)``, values in
         ``(0, 1]``) by evaluating the empirical model at each node's local
         ``Vp`` and folding in any discrete-void stress concentration factors.
+        When ``environment`` and / or ``cycles`` are supplied, the hygrothermal
+        and / or S-N fatigue knockdowns are composed multiplicatively into
+        the per-node field (issue #59).
 
         Parameters
         ----------
@@ -2117,6 +2449,21 @@ class EmpiricalSolver:
             discrete-void SCF post-step still applies so caller-defined
             knockdowns and explicit voids compose the same way as the
             built-in models.
+        cycles : int or float, optional
+            Number of load cycles ``N`` for an S-N fatigue knockdown
+            (issue #59). When ``None`` (default) no fatigue effect is
+            applied. When supplied, the :class:`FatigueModel` log-linear
+            knockdown is composed multiplicatively. Requires ``N >= 1``.
+        environment : dict, optional
+            Mapping with optional keys ``'T'`` (service temperature, deg C)
+            and ``'M'`` (moisture content, wt%) for the hygrothermal
+            knockdown (issue #59). When ``None`` (default) no environment
+            effect is applied. The hygrothermal factor comes from
+            :meth:`MaterialProperties.environment_knockdown`.
+        R : float, optional
+            Stress ratio for the fatigue knockdown. Currently
+            informational; default (``None``) falls back to ``R = 0.1``
+            (tension-tension).
 
         Notes
         -----
@@ -2140,16 +2487,29 @@ class EmpiricalSolver:
         model_func, _is_user = self._resolve_knockdown_model(model, mode)
         kd = np.array([model_func(Vp, mode) for Vp in self.mesh.porosity])
         kd = self._apply_discrete_void_scf(kd, mode)
+        env_kd = self._environment_knockdown_factor(mode, environment)
+        fat_kd = self._fatigue_knockdown_factor(mode, cycles, R)
+        if env_kd != 1.0:
+            kd = kd * env_kd
+        if fat_kd != 1.0:
+            kd = kd * fat_kd
         self.nodal_knockdown = kd  # type: ignore[assignment]  # lazy-init attr starts None
 
     def get_failure_load(self, mode: str = 'compression',
                          model: Union[str, Callable[[float, str], float]]
-                         = 'judd_wright') -> 'FailureResult':
+                         = 'judd_wright',
+                         *,
+                         cycles: Optional[float] = None,
+                         environment: Optional[Dict[str, float]] = None,
+                         R: Optional[float] = None) -> 'FailureResult':
         """Compute failure load using specimen-average porosity.
 
         The knockdown is evaluated at the mean Vp (matching how the original
         correlations were calibrated), not at the local peak.  Per-node
         knockdown is still computed for visualization via apply_loading().
+        Optional hygrothermal (``environment``) and S-N fatigue
+        (``cycles`` / ``R``) knockdowns compose multiplicatively with the
+        porosity knockdown (issue #59).
 
         Parameters
         ----------
@@ -2161,44 +2521,85 @@ class EmpiricalSolver:
             ``model(Vp: float, mode: str) -> float ∈ [0, 1]``. User
             callables bypass the layup-scaled coefficient table (the caller
             owns their model).
+        cycles : int or float, optional
+            Number of load cycles ``N`` for an S-N fatigue knockdown.
+            When ``None`` (default) returns ``1.0`` for the fatigue
+            factor (no fatigue effect). When supplied, the
+            :class:`FatigueModel` log-linear knockdown composes
+            multiplicatively with the porosity knockdown. The result
+            ``details`` dict gains a ``'fatigue_knockdown'`` entry so the
+            breakdown is auditable.
+        environment : dict, optional
+            Hygrothermal conditioning dict with optional keys ``'T'``
+            (service temperature, deg C) and ``'M'`` (moisture content,
+            wt%). When ``None`` (default) no hygrothermal knockdown is
+            applied. Composed multiplicatively with porosity and fatigue;
+            the result ``details`` dict gains an ``'environment_knockdown'``
+            entry when active.
+        R : float, optional
+            Stress ratio for the fatigue knockdown. Currently informational
+            (default ``None`` -> ``R = 0.1``).
 
         Returns
         -------
         FailureResult
             Unified failure summary (#44 item 1) with ``failure_stress``,
             ``knockdown``, ``model`` attributes plus a ``details`` dict
-            carrying the legacy ``'critical_location'`` extra. Back-compat
-            dict-style access (``result['failure_stress']``,
-            ``result['critical_location']``, etc.) is preserved via the
-            :class:`FailureResult` ``__getitem__`` shim and will be
-            removed in a future major version — prefer attribute access.
+            carrying the legacy ``'critical_location'`` extra and the new
+            ``'environment_knockdown'`` / ``'fatigue_knockdown'`` entries
+            (when active). Back-compat dict-style access
+            (``result['failure_stress']``, ``result['critical_location']``,
+            etc.) is preserved via the :class:`FailureResult`
+            ``__getitem__`` shim and will be removed in a future major
+            version — prefer attribute access.
         """
-        self.apply_loading(mode, model)
+        self.apply_loading(mode, model,
+                           cycles=cycles, environment=environment, R=R)
         sigma_0 = self._get_pristine_strength(mode)
 
         # Use specimen-average Vp for knockdown (matches calibration basis)
         Vp_mean = self.mesh.porosity_field.Vp
         model_func, _is_user = self._resolve_knockdown_model(model, mode)
-        mean_kd = float(model_func(Vp_mean, mode))
+        porosity_kd = float(model_func(Vp_mean, mode))
+
+        # Hygrothermal and fatigue knockdowns compose multiplicatively at
+        # the same point as the porosity knockdown so the final
+        # `failure_stress` carries all three effects, mirroring how the
+        # layup scaling is folded into the empirical coefficients upstream.
+        env_kd = self._environment_knockdown_factor(mode, environment)
+        fat_kd = self._fatigue_knockdown_factor(mode, cycles, R)
+        mean_kd = porosity_kd * env_kd * fat_kd
 
         # Record a JSON-friendly label even when the caller passes a
         # callable (lambdas/closures don't round-trip through json.dumps).
         model_label = model if isinstance(model, str) else getattr(
             model, '__name__', 'user_callable')
 
+        details = {
+            'critical_location': [0.0, 0.0, 0.0],
+            'mode': mode,
+        }
+        # Surface the per-knockdown breakdown in ``details`` so callers
+        # (e.g. the #65 tornado sensitivities) can audit the composition.
+        if environment is not None:
+            details['environment_knockdown'] = float(env_kd)
+        if cycles is not None:
+            details['fatigue_knockdown'] = float(fat_kd)
+
         return FailureResult(
             failure_stress=float(sigma_0 * mean_kd),
             knockdown=float(mean_kd),
             model=str(model_label),
-            details={
-                'critical_location': [0.0, 0.0, 0.0],
-                'mode': mode,
-            },
+            details=details,
         )
 
     def get_all_failure_loads(
             self,
-            extra_models: Optional[Dict[str, Callable[[float, str], float]]] = None
+            extra_models: Optional[Dict[str, Callable[[float, str], float]]] = None,
+            *,
+            cycles: Optional[float] = None,
+            environment: Optional[Dict[str, float]] = None,
+            R: Optional[float] = None,
     ) -> dict:
         """Compute failure loads for all modes against all built-in models.
 
@@ -2210,6 +2611,16 @@ class EmpiricalSolver:
             dict; its value must be a callable matching the contract
             ``model(Vp: float, mode: str) -> float ∈ [0, 1]``. The built-in
             three models are always included.
+        cycles : int or float, optional
+            Number of load cycles ``N`` for an S-N fatigue knockdown
+            (issue #59). Threaded into every :meth:`get_failure_load` call.
+            ``None`` -> no fatigue effect.
+        environment : dict, optional
+            Hygrothermal conditioning dict (see :meth:`apply_loading`).
+            Threaded into every :meth:`get_failure_load` call. ``None`` ->
+            no hygrothermal effect.
+        R : float, optional
+            Stress ratio for the fatigue knockdown (informational).
         """
         results: Dict[str, Dict[str, dict]] = {}
         all_models: List[Tuple[str, Union[str, Callable[[float, str], float]]]] = [
@@ -2224,7 +2635,10 @@ class EmpiricalSolver:
                      'transverse_tension']:
             results[mode] = {}
             for label, model in all_models:
-                results[mode][label] = self.get_failure_load(mode, model)
+                results[mode][label] = self.get_failure_load(
+                    mode, model,
+                    cycles=cycles, environment=environment, R=R,
+                )
         return results
 
     def local_sensitivities(self, mode: str = 'compression',
