@@ -2560,6 +2560,46 @@ class TestEnvironmentalKnockdown:
             kd_fat, rel=1e-12)
 
 
+class TestFatigueModelValidation:
+    """#149: pin input-validation branches of FatigueModel.knockdown_factor.
+
+    Covers the three guard clauses that were previously unexercised:
+    - unknown ``mode`` rejected by :meth:`FatigueModel._slope`
+    - non-finite ``R`` rejected up front
+    - ``cycles`` either below 1 or non-finite rejected before slope lookup
+    """
+
+    def setup_method(self):
+        from porosity_fe_analysis import FatigueModel
+        self.FatigueModel = FatigueModel
+
+    def test_unknown_mode_raises(self):
+        """Unknown mode keys must raise ValueError with a descriptive message."""
+        fm = self.FatigueModel()
+        with pytest.raises(ValueError, match=r"Unknown fatigue mode"):
+            fm.knockdown_factor('unknown_mode', cycles=1e6)
+
+    def test_non_finite_R_raises(self):
+        """Non-finite ``R`` (nan / inf / -inf) must be rejected."""
+        fm = self.FatigueModel()
+        for bad_R in (float('nan'), float('inf'), float('-inf')):
+            with pytest.raises(ValueError, match=r"R must be finite"):
+                fm.knockdown_factor('tension', cycles=1e6, R=bad_R)
+
+    def test_cycles_below_one_raises(self):
+        """``cycles < 1`` (below the static one-cycle anchor) is invalid."""
+        fm = self.FatigueModel()
+        with pytest.raises(ValueError, match=r"cycles must be a finite"):
+            fm.knockdown_factor('tension', cycles=0.5)
+
+    def test_cycles_non_finite_raises(self):
+        """Non-finite ``cycles`` (inf / nan) must also be rejected."""
+        fm = self.FatigueModel()
+        for bad_cycles in (float('inf'), float('nan')):
+            with pytest.raises(ValueError, match=r"cycles must be a finite"):
+                fm.knockdown_factor('tension', cycles=bad_cycles)
+
+
 class TestDistributionComparison:
     """#83: uniform vs clustered/interface knockdowns at matched Vp_mean.
 
