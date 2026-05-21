@@ -4190,6 +4190,16 @@ def _extract_knockdowns(results: dict) -> dict:
     return flat
 
 
+def _crashing_worker(*args, **kwargs):
+    """Module-level stand-in for ``_analyze_one`` used by the parallel
+    exception-propagation test (#154).
+
+    Has to live at module scope so ``ProcessPoolExecutor`` can pickle it
+    by qualified name when ``compare_configurations`` submits tasks.
+    """
+    raise RuntimeError("Worker crash")
+
+
 class TestParallelSweep:
     """Parallel ``compare_configurations`` path (#52)."""
 
@@ -4267,6 +4277,52 @@ class TestParallelSweep:
         p_flat = _extract_knockdowns(also_serial)
         for k in s_flat:
             assert p_flat[k] == s_flat[k]
+
+    def test_parallel_worker_exception_propagates(self, monkeypatch):
+        """A worker exception must re-raise in the parent, not be
+        silently swallowed (#154).
+
+        ``compare_configurations`` collects parallel results via
+        ``future.result()`` inside an ``as_completed`` loop; that call
+        re-raises whatever the worker raised. We pin that contract by
+        monkeypatching ``_analyze_one`` on the pipeline module to raise
+        ``RuntimeError`` unconditionally. On Linux the
+        ``ProcessPoolExecutor`` default start method is fork, so the
+        child inherits the patched module attribute and the exception
+        crosses the process boundary as expected.
+        """
+        from porosity_fe import pipeline as _pipeline
+
+        monkeypatch.setattr(_pipeline, "_analyze_one", _crashing_worker)
+
+        # Two configs so we actually take the parallel branch
+        # (``len(tasks) > 1`` and ``workers > 1``).
+        configs = {
+            'uniform_spherical': POROSITY_CONFIGS['uniform_spherical'],
+            'clustered_midplane': POROSITY_CONFIGS['clustered_midplane'],
+        }
+        with pytest.raises(RuntimeError, match="Worker crash"):
+            compare_configurations(0.03, configs=configs, n_jobs=2)
+
+    def test_parallel_results_assembled_by_config_name(self):
+        """Result-dict key order must match caller-supplied config insertion
+        order, never worker completion order (#154).
+
+        ``as_completed`` yields futures in completion order, which is
+        non-deterministic, so the assembly loop has to re-iterate the
+        original ``configs`` mapping. We run the sweep 10 times with
+        distinctive names to make any worker-completion-order leak
+        obvious; even a single iteration with reversed keys would fail.
+        """
+        configs = {
+            'cfg_alpha': POROSITY_CONFIGS['uniform_spherical'],
+            'cfg_beta': POROSITY_CONFIGS['clustered_midplane'],
+        }
+        expected_order = list(configs.keys())
+        for _ in range(10):
+            results = compare_configurations(
+                0.03, configs=configs, n_jobs=2)
+            assert list(results.keys()) == expected_order
 
 
 class TestCLIMain:
