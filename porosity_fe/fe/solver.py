@@ -1015,7 +1015,12 @@ class FESolver:
                          ) -> Dict[str, np.ndarray]:
         """2D Hashin failure indices for unidirectional plies.
 
-        Implements the standard four-mode Hashin criterion (Hashin, 1980).
+        Implements the Hashin (1980) 2D criterion with separate fiber/matrix
+        tension/compression modes. Reference:
+
+            Hashin, Z. (1980). "Failure Criteria for Unidirectional Fiber
+            Composites." J. Appl. Mech. 47(2), 329-334.
+
         Indices are computed per Gauss point on the in-plane local stresses
         ``(σ_11, σ_22, τ_12)``; ``σ_33`` and out-of-plane shears are ignored
         because the standard formulation is 2D. The ``shear`` slot returns
@@ -1023,6 +1028,32 @@ class FESolver:
 
         Returns a dict of per-GP arrays:
         ``{'max_fi', 'fiber_t', 'fiber_c', 'matrix_t', 'matrix_c', 'shear'}``.
+
+        Notes
+        -----
+        "Hashin" is a family of criteria rather than a single canonical form.
+        Commercial codes (ANSYS, Abaqus's user-material variants, LS-DYNA's
+        ``MAT_LAMINATED_COMPOSITE_FABRIC``, etc.) ship slightly different
+        variants of the matrix-compression mode in particular. The two most
+        common deviations from the 1980 paper are:
+
+        1. **Matrix-compression denominator.** The 1980 paper uses
+           ``(2·S_23)^2`` together with the ``((Y_c / (2·S_23))^2 - 1) ·
+           (σ_22 / Y_c)`` cross term; some codes substitute plain ``S_23``,
+           others reformulate the denominator entirely (e.g. ``(2·S_23)^2 -
+           (S_23 - Y_c)^2`` style expressions).
+        2. **Shear strength in the matrix-compression term.** The 1980 paper
+           uses ``S_12`` (in-plane shear) in the ``(τ_12 / S_12)^2``
+           contribution to matrix compression; some commercial implementations
+           swap this for ``S_23`` (through-thickness shear), which changes
+           predictions for transversely-loaded plies.
+
+        The PorosityFE implementation matches the 1980 paper exactly:
+        matrix-compression uses ``(2·S_23)^2`` as the normal-stress denominator
+        and ``S_12`` in the shear term. Users comparing PorosityFE indices
+        against an external Hashin reference (commercial solver, textbook,
+        or another open-source code) should verify the variant convention
+        on the other side before treating any divergence as a bug.
         """
         Xt_s, Xc_s, Yt_s, Yc_s, S12_s, S23_s = strengths
         sigma_11 = s_all[:, 0]
