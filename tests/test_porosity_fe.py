@@ -1152,6 +1152,160 @@ class TestMTEffectiveStiffness:
         assert b[0, 0] > a[0, 0]
 
 
+class TestOblateMTValidation:
+    """Regression pin for the oblate (penny-void) Eshelby branch (#143).
+
+    Issue #32 fixed an earlier bug where oblate (alpha < 1) voids were
+    silently routed to the prolate Eshelby g-function. The current
+    implementation in ``_mt_effective_stiffness`` selects the correct
+    g-function on ``alpha > 1.0`` vs the ``else`` (alpha <= 1) branch.
+    The math is correct; these tests pin numerical snapshots of the
+    post-#32 behavior so that future refactors are forced to confirm
+    they reproduce the same Mori-Tanaka output.
+
+    Reference: Mura, T. (1987) *Micromechanics of Defects in Solids* §11
+    and Nemat-Nasser & Hori (1999) §7.4 describe the prolate/oblate
+    Eshelby tensor split. No closed-form analytical value is hand-
+    derived here; the snapshots in ``test_oblate_transverse_stiffness_
+    regression_pin`` are pinned from the current correct implementation
+    (a regression pin, per the issue's note that the math is already
+    right).
+    """
+
+    def setup_method(self):
+        self.mat = MATERIALS['T800_epoxy']
+        self.C_m = self.mat.get_isotropic_matrix_stiffness()
+        self.nu_m = self.mat.matrix_poisson
+
+    def test_sphere_limit_oblate_matches_prolate(self):
+        """As alpha -> 1, the prolate and oblate branches must converge to the
+        same sphere result (analytic continuation across alpha = 1).
+
+        Note on tolerance: the issue text proposed ``atol=1e-12``, but at
+        ``alpha = 1`` exactly both branches divide by (alpha^2 - 1) and are
+        singular. The smallest aspect-ratio offset that still bypasses the
+        function's internal sphere shortcut (which fires when all three
+        radii are within 1% of each other) is eps ~ 0.011. At that offset
+        the prolate(1+eps) and oblate(1-eps) results are two physically
+        different configurations and necessarily differ at O(eps), so a
+        bit-exact match is mathematically impossible. We pin the looser
+        but still tight tolerance that actually holds. Measured gap at
+        eps=0.011: |Cp - Co|_inf / |Csph|_inf ~ 3.5e-3.
+        """
+        eps = 0.011  # just outside the 1% sphere shortcut
+        # Compute the sphere baseline via the function's sphere shortcut
+        # (radii all equal => short-circuit branch).
+        from porosity_fe_analysis import _mt_cache_clear
+        _mt_cache_clear()
+        C_sphere = _mt_effective_stiffness(
+            self.C_m, 0.05, (1.0, 1.0, 1.0), self.nu_m)
+        _mt_cache_clear()
+        C_prolate = _mt_effective_stiffness(
+            self.C_m, 0.05, (1.0, 1.0, 1.0 + eps), self.nu_m)
+        _mt_cache_clear()
+        C_oblate = _mt_effective_stiffness(
+            self.C_m, 0.05, (1.0, 1.0, 1.0 - eps), self.nu_m)
+
+        scale = np.max(np.abs(C_sphere))
+        # Each branch is within ~0.2% of the sphere result at eps=0.011.
+        np.testing.assert_allclose(C_prolate, C_sphere, atol=0.005 * scale)
+        np.testing.assert_allclose(C_oblate, C_sphere, atol=0.005 * scale)
+        # Cross-difference (both branches agree near the sphere limit)
+        # to ~0.5% — pins that the formulas are analytic continuations.
+        np.testing.assert_allclose(C_prolate, C_oblate, atol=0.01 * scale)
+
+    def test_oblate_transverse_stiffness_regression_pin(self):
+        """Snapshot pin for a penny-shaped void (alpha = 0.01) at 5% porosity.
+
+        Regression pin per #143; snapshot of post-#32 behavior. Penny axis
+        is along x_3 (radii = (1, 1, 0.01)), so x_1 / x_2 are the in-plane
+        (transverse to the disk axis) directions. ``C_eff[1, 1]`` is the
+        in-plane stiffness perpendicular to the penny axis.
+
+        These values were generated from the current implementation and
+        will catch any silent regression in the oblate g-function or the
+        Voigt permutation that maps the canonical-frame Eshelby tensor
+        onto the actual axis.
+        """
+        from porosity_fe_analysis import _mt_cache_clear
+        _mt_cache_clear()
+        C_eff = _mt_effective_stiffness(
+            self.C_m, 0.05, (1.0, 1.0, 0.01), self.nu_m)
+        # Snapshot to ~5 significant figures; rtol=1e-4 catches numerically
+        # meaningful regressions while tolerating cross-platform FP noise.
+        assert C_eff[1, 1] == pytest.approx(5345.6799, rel=1e-4)
+        assert C_eff[0, 0] == pytest.approx(5345.6799, rel=1e-4)
+        # Off-diagonal in-plane coupling (also pinned)
+        assert C_eff[0, 1] == pytest.approx(2884.2736, rel=1e-4)
+        # Penny in-plane transverse isotropy: C[0,0] == C[1,1] exactly.
+        assert C_eff[0, 0] == pytest.approx(C_eff[1, 1], rel=1e-12)
+
+    def test_oblate_monotonic_in_vp(self):
+        """Increasing porosity must monotonically reduce transverse stiffness
+        for an oblate (penny) void at fixed aspect ratio.
+        """
+        from porosity_fe_analysis import _mt_cache_clear
+        Vps = [0.001, 0.01, 0.03, 0.05]
+        C22_values = []
+        for Vp in Vps:
+            _mt_cache_clear()
+            C = _mt_effective_stiffness(
+                self.C_m, Vp, (1.0, 1.0, 0.01), self.nu_m)
+            C22_values.append(C[1, 1])
+        C22_values = np.array(C22_values)
+        assert np.all(np.diff(C22_values) < 0), (
+            f"transverse stiffness not strictly decreasing in Vp: {C22_values}"
+        )
+
+    def test_oblate_more_severe_than_prolate_at_matched_vp(self):
+        """At matched Vp, compare oblate (penny) vs prolate (needle) transverse
+        stiffness reduction.
+
+        Note on the issue's expected inequality (#143): the issue text
+        predicted that penny (oblate) voids would degrade C[1, 1] *more*
+        than prolate (needle) voids at matched Vp. That intuition is
+        wrong for the canonical orientation:
+
+        - Penny axis along x_3 (radii = (1, 1, 0.01)) means the disk lies
+          IN the x_1-x_2 plane. Loads along x_1 (i.e. C[1, 1]) travel
+          along the long in-plane dimension of the disk and barely see
+          the void — degradation is mild (ratio ~ 0.952 at Vp = 0.05).
+          The brutal direction is C[2, 2] (through-thickness, where the
+          load is forced across the penny's short axis); this matches
+          the existing ``test_penny_void_anisotropy_along_short_axis``
+          regression for #32.
+        - Prolate along x_3 (radii = (1, 1, 100)) is a long needle.
+          Transverse loads (C[1, 1]) have to flow around the entire
+          length of the needle — degradation is severe (ratio ~ 0.833
+          at Vp = 0.05).
+
+        So at matched Vp, prolate degrades C[1, 1] MORE than oblate, not
+        less. We pin the actual (correct) physics here rather than the
+        issue's predicted inequality.
+        """
+        from porosity_fe_analysis import _mt_cache_clear
+        Vp = 0.05
+        _mt_cache_clear()
+        C_oblate = _mt_effective_stiffness(
+            self.C_m, Vp, (1.0, 1.0, 0.01), self.nu_m)
+        _mt_cache_clear()
+        C_prolate = _mt_effective_stiffness(
+            self.C_m, Vp, (1.0, 1.0, 100.0), self.nu_m)
+
+        ratio_oblate = C_oblate[1, 1] / self.C_m[1, 1]
+        ratio_prolate = C_prolate[1, 1] / self.C_m[1, 1]
+        # Actual measured ratios (snapshotted): oblate ~0.952, prolate ~0.833.
+        # Prolate is MORE severe on the transverse C[1, 1] component.
+        assert ratio_prolate < ratio_oblate, (
+            f"expected prolate C[1,1] reduction stronger than oblate; "
+            f"got oblate={ratio_oblate:.4f}, prolate={ratio_prolate:.4f}"
+        )
+        # Pin the numerical values too so the inequality direction can't
+        # silently flip without flagging the snapshot.
+        assert ratio_oblate == pytest.approx(0.9516, rel=1e-3)
+        assert ratio_prolate == pytest.approx(0.8328, rel=1e-3)
+
+
 class TestDegradedCompositeStiffness:
     """Direct unit tests for _degraded_composite_stiffness (#48).
 
@@ -4190,6 +4344,16 @@ def _extract_knockdowns(results: dict) -> dict:
     return flat
 
 
+def _crashing_worker(*args, **kwargs):
+    """Module-level stand-in for ``_analyze_one`` used by the parallel
+    exception-propagation test (#154).
+
+    Has to live at module scope so ``ProcessPoolExecutor`` can pickle it
+    by qualified name when ``compare_configurations`` submits tasks.
+    """
+    raise RuntimeError("Worker crash")
+
+
 class TestParallelSweep:
     """Parallel ``compare_configurations`` path (#52)."""
 
@@ -4267,6 +4431,52 @@ class TestParallelSweep:
         p_flat = _extract_knockdowns(also_serial)
         for k in s_flat:
             assert p_flat[k] == s_flat[k]
+
+    def test_parallel_worker_exception_propagates(self, monkeypatch):
+        """A worker exception must re-raise in the parent, not be
+        silently swallowed (#154).
+
+        ``compare_configurations`` collects parallel results via
+        ``future.result()`` inside an ``as_completed`` loop; that call
+        re-raises whatever the worker raised. We pin that contract by
+        monkeypatching ``_analyze_one`` on the pipeline module to raise
+        ``RuntimeError`` unconditionally. On Linux the
+        ``ProcessPoolExecutor`` default start method is fork, so the
+        child inherits the patched module attribute and the exception
+        crosses the process boundary as expected.
+        """
+        from porosity_fe import pipeline as _pipeline
+
+        monkeypatch.setattr(_pipeline, "_analyze_one", _crashing_worker)
+
+        # Two configs so we actually take the parallel branch
+        # (``len(tasks) > 1`` and ``workers > 1``).
+        configs = {
+            'uniform_spherical': POROSITY_CONFIGS['uniform_spherical'],
+            'clustered_midplane': POROSITY_CONFIGS['clustered_midplane'],
+        }
+        with pytest.raises(RuntimeError, match="Worker crash"):
+            compare_configurations(0.03, configs=configs, n_jobs=2)
+
+    def test_parallel_results_assembled_by_config_name(self):
+        """Result-dict key order must match caller-supplied config insertion
+        order, never worker completion order (#154).
+
+        ``as_completed`` yields futures in completion order, which is
+        non-deterministic, so the assembly loop has to re-iterate the
+        original ``configs`` mapping. We run the sweep 10 times with
+        distinctive names to make any worker-completion-order leak
+        obvious; even a single iteration with reversed keys would fail.
+        """
+        configs = {
+            'cfg_alpha': POROSITY_CONFIGS['uniform_spherical'],
+            'cfg_beta': POROSITY_CONFIGS['clustered_midplane'],
+        }
+        expected_order = list(configs.keys())
+        for _ in range(10):
+            results = compare_configurations(
+                0.03, configs=configs, n_jobs=2)
+            assert list(results.keys()) == expected_order
 
 
 class TestCLIMain:
@@ -4698,6 +4908,56 @@ class TestPropagateUncertainty:
         with pytest.raises(ValueError, match="non-perturbable"):
             propagate_uncertainty(0.02, 'T800_epoxy',
                                   covs={'not_a_field': 0.1}, n_samples=4)
+
+    # Issue #153: pin the input-validation branches in propagate_uncertainty,
+    # _normalize_uq_spec, and _draw_unit_samples. These are advanced-user
+    # guard rails -- the messages are exactly what someone debugging an
+    # unusual UQ input needs, so a silent regression would hurt.
+
+    def test_invalid_field_raises(self):
+        with pytest.raises(ValueError, match="non-perturbable"):
+            propagate_uncertainty(0.02, 'T800_epoxy',
+                                  covs={'not_a_field': 0.1},
+                                  n_samples=self._N)
+
+    def test_invalid_sampling_method_raises(self):
+        with pytest.raises(ValueError, match="Unknown sampling method"):
+            propagate_uncertainty(0.02, 'T800_epoxy',
+                                  covs={'sigma_1c': 0.08},
+                                  n_samples=self._N,
+                                  method='importance_sampling')
+
+    def test_invalid_percentile_raises(self):
+        with pytest.raises(ValueError, match=r"percentiles must lie in \[0, 100\]"):
+            propagate_uncertainty(0.02, 'T800_epoxy',
+                                  covs={'sigma_1c': 0.08},
+                                  n_samples=self._N,
+                                  percentiles=(5, 150))
+
+    def test_non_positive_n_samples_raises(self):
+        with pytest.raises(ValueError, match="n_samples must be a positive integer"):
+            propagate_uncertainty(0.02, 'T800_epoxy',
+                                  covs={'sigma_1c': 0.08},
+                                  n_samples=0)
+        with pytest.raises(ValueError, match="n_samples must be a positive integer"):
+            propagate_uncertainty(0.02, 'T800_epoxy',
+                                  covs={'sigma_1c': 0.08},
+                                  n_samples=-1)
+
+    def test_unknown_material_raises(self):
+        with pytest.raises(ValueError, match="Unknown material"):
+            propagate_uncertainty(0.02, 'nonsense',
+                                  covs={'sigma_1c': 0.08},
+                                  n_samples=self._N)
+
+    def test_malformed_spec_tuple_raises(self):
+        # The (distribution, params) shape check lives on the `spec=` path;
+        # passing a 1-tuple there should fail with the documented message.
+        with pytest.raises(ValueError,
+                           match=r"must be a \(distribution, params\) pair"):
+            propagate_uncertainty(0.02, 'T800_epoxy',
+                                  spec={'E11': (0.1,)},
+                                  n_samples=self._N)
 
 
 # Issue #65: closed-form local sensitivities + per-point validation bands.
