@@ -2560,6 +2560,46 @@ class TestEnvironmentalKnockdown:
             kd_fat, rel=1e-12)
 
 
+class TestFatigueModelValidation:
+    """#149: pin input-validation branches of FatigueModel.knockdown_factor.
+
+    Covers the three guard clauses that were previously unexercised:
+    - unknown ``mode`` rejected by :meth:`FatigueModel._slope`
+    - non-finite ``R`` rejected up front
+    - ``cycles`` either below 1 or non-finite rejected before slope lookup
+    """
+
+    def setup_method(self):
+        from porosity_fe_analysis import FatigueModel
+        self.FatigueModel = FatigueModel
+
+    def test_unknown_mode_raises(self):
+        """Unknown mode keys must raise ValueError with a descriptive message."""
+        fm = self.FatigueModel()
+        with pytest.raises(ValueError, match=r"Unknown fatigue mode"):
+            fm.knockdown_factor('unknown_mode', cycles=1e6)
+
+    def test_non_finite_R_raises(self):
+        """Non-finite ``R`` (nan / inf / -inf) must be rejected."""
+        fm = self.FatigueModel()
+        for bad_R in (float('nan'), float('inf'), float('-inf')):
+            with pytest.raises(ValueError, match=r"R must be finite"):
+                fm.knockdown_factor('tension', cycles=1e6, R=bad_R)
+
+    def test_cycles_below_one_raises(self):
+        """``cycles < 1`` (below the static one-cycle anchor) is invalid."""
+        fm = self.FatigueModel()
+        with pytest.raises(ValueError, match=r"cycles must be a finite"):
+            fm.knockdown_factor('tension', cycles=0.5)
+
+    def test_cycles_non_finite_raises(self):
+        """Non-finite ``cycles`` (inf / nan) must also be rejected."""
+        fm = self.FatigueModel()
+        for bad_cycles in (float('inf'), float('nan')):
+            with pytest.raises(ValueError, match=r"cycles must be a finite"):
+                fm.knockdown_factor('tension', cycles=bad_cycles)
+
+
 class TestDistributionComparison:
     """#83: uniform vs clustered/interface knockdowns at matched Vp_mean.
 
@@ -4360,6 +4400,55 @@ class TestCLIMain:
         # Both alternatives surfaced — user gets to pick.
         assert '--vp 0.0300' in err
         assert '--vp-pct 3' in err
+
+    # #147: pin the two uncovered error-handling branches in cli.main so
+    # future refactors can't silently drop the user-facing hints.
+
+    def test_cli_main_vp_out_of_range_with_percentage_hint(
+            self, tmp_path, capsys):
+        """`--vp 5` is in the 1-100 "looks like a percentage" band, so the
+        error must include BOTH the fraction-form suggestion (`--vp 0.0500`)
+        and the percent-alias suggestion (`--vp-pct 5`). Regression for the
+        hint added in #127/#137 — covers cli.py lines ~270-275."""
+        with pytest.raises(SystemExit) as exc:
+            porosity_fe_analysis.main([
+                '--vp', '5',
+                '--output-dir', str(tmp_path),
+            ])
+        # argparse.error() exits with code 2 for invalid usage.
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        # Both alternatives must be surfaced so the user can pick.
+        assert '--vp 0.0500' in err
+        assert '--vp-pct 5' in err
+
+    def test_cli_main_output_dir_permission_error(
+            self, tmp_path, monkeypatch, capsys):
+        """If ``os.makedirs`` raises OSError (e.g. permission denied or an
+        invalid path), the CLI must surface the failure on stderr and
+        return exit code 2 rather than crashing with a traceback. Covers
+        cli.py lines ~284-287."""
+        def _raise_permission_error(*args, **kwargs):
+            raise PermissionError("denied")
+
+        # Patch ``os.makedirs`` on the cli module so the call inside
+        # main() picks up the raising stub. The shim doesn't re-export
+        # the cli submodule, so import it via the package directly.
+        from porosity_fe import cli as _cli_mod
+        monkeypatch.setattr(
+            _cli_mod.os, 'makedirs',
+            _raise_permission_error,
+        )
+        rc = porosity_fe_analysis.main([
+            '--vp', '0.02',
+            '--output-dir', str(tmp_path / 'nope'),
+            '--quiet',
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        # Error message should mention the underlying failure so the user
+        # knows what went wrong.
+        assert 'denied' in err.lower() or 'permission' in err.lower()
 
 
 class TestMaterialPropertiesPerturb:
