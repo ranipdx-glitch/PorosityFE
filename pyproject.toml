@@ -61,9 +61,13 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/elhajjar1/PorosityFE"
-Repository = "https://github.com/elhajjar1/PorosityFE"
-Issues = "https://github.com/elhajjar1/PorosityFE/issues"
+# This fork (ranipdx-glitch) is the active development home: it owns the
+# GitHub Pages deployment, the active issue tracker, and ongoing PRs.
+# Unify all URLs on this org so PyPI metadata points users at the live
+# project rather than the upstream snapshot.
+Homepage = "https://github.com/ranipdx-glitch/PorosityFE"
+Repository = "https://github.com/ranipdx-glitch/PorosityFE"
+Issues = "https://github.com/ranipdx-glitch/PorosityFE/issues"
 Documentation = "https://ranipdx-glitch.github.io/PorosityFE/"
 
 [project.scripts]
