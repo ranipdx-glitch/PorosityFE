@@ -270,6 +270,27 @@ robust.)
 A runnable side-by-side comparison (table + two PNGs) lives in
 [`examples/distribution_comparison.py`](examples/distribution_comparison.py).
 
+### Solver selection: FE vs. empirical
+
+Both solver paths predict porosity knockdown, but they use different
+physics for the strength-degradation step. The empirical solver
+(`EmpiricalSolver`) applies calibrated closed-form correlations
+(Judd-Wright, power-law, linear) fit to coupon data. The FE solver
+(`FESolver`) instead applies a heuristic sqrt scaling on per-component
+ply strengths (`strength ~ sqrt(stiffness_retention)`; see
+`FESolver._degraded_strengths`). These are fundamentally different
+mathematical forms, so the two paths will give numerically different
+knockdowns for the same `(layup, Vp)` -- this divergence is by design,
+not a bug.
+
+Guidance on which to use:
+
+- **Empirical solver** -- fast screening, headline knockdown numbers,
+  and comparison against published coupon data.
+- **FE solver** -- stress-field analysis, per-element failure criteria
+  (Tsai-Wu / Hashin / max-stress), and any study that needs the full
+  mesh-level result.
+
 ## Output Files
 
 | File Pattern | Description |
@@ -428,6 +449,17 @@ Full 3D Tsai-Wu with degraded strengths:
 ```
 F1*s1 + F2*s2 + F11*s1^2 + F22*s2^2 + F66*s6^2 + 2*F12*s1*s2 = 1
 ```
+
+**Tsai-Wu `F_12` convention (caveat for external comparisons).** When
+benchmarking PorosityFE Tsai-Wu predictions against another code or
+reference dataset, confirm the in-plane interaction coefficient `F_12`
+convention matches. PorosityFE uses Tsai's recommendation
+`F_12 = -0.5 * sqrt(F_11 * F_22)` (Tsai & Wu, 1971) by default — an
+empirical choice, not a first-principles derivation. The exact value
+varies with the material system; if you have biaxial coupon
+calibration data, override it per-material via
+`MaterialProperties(tsai_wu_F12=...)` (must lie in `[-1, 0]` for a
+closed envelope).
 
 ## Validation
 

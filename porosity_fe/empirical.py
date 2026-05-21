@@ -197,6 +197,17 @@ class EmpiricalSolver:
                 total += 0.5
         return total / len(ply_angles)
 
+    # TODO(#140): The linear f_md / _F_MD_REF scaling is preserved here for
+    # historical compatibility. Investigation in #140 measured a relative
+    # error of up to 33.5% against a CLT-derived stiffness-retention proxy
+    # (sqrt(Ex_layup(Vp)/Ex_layup(0)) / sqrt(Ex_QI(Vp)/Ex_QI(0)) over
+    # Vp in [0.005, 0.05]) for a UD [0,0,0]_s layup; >5% error also seen
+    # on UD-heavy [0_2,90]_s and off-axis [0,15,-15]_s layups. A
+    # polynomial or interpolated lookup should be evaluated against an
+    # independent reference dataset (FE simulation or experimental
+    # coupons spanning the intermediate f_md range) before the scaling
+    # is replaced. See TestLayupScaleRegressionPin in
+    # tests/test_porosity_fe.py.
     def _layup_scale(self, mode: str) -> float:
         """Scaling factor for empirical coefficients based on layup.
 

@@ -346,7 +346,12 @@ class FESolver:
         Default failure criterion used by :meth:`solve` when no per-call
         override is supplied. ``'tsai_wu'`` (default) applies the
         quadratic Tsai-Wu interaction polynomial and preserves the
-        historical bit-identical behavior. ``'hashin'`` uses the Hashin
+        historical bit-identical behavior. The Tsai-Wu in-plane
+        interaction coefficient ``F_12`` is taken from
+        :attr:`MaterialProperties.tsai_wu_F12` when set; otherwise the
+        Tsai & Wu (1971) recommendation
+        ``F_12 = -0.5 * sqrt(F_11 * F_22)`` is used (see
+        :meth:`_evaluate_tsai_wu`). ``'hashin'`` uses the Hashin
         2D criterion with separate fiber/matrix tension/compression
         modes. ``'max_stress'`` uses an uncoupled maximum-stress check
         against each lamina strength. Validated against
@@ -796,6 +801,39 @@ class FESolver:
         stiffness ratio. Strengths are clamped to a small numerical floor so
         the per-criterion polynomial cannot divide by zero.
 
+        Scaling rule
+        ------------
+        Per-component strengths are scaled by the square root of the
+        corresponding stiffness retention ratio. Concretely, for the
+        matrix-dominated components::
+
+            r_matrix = sqrt(C_eff[0, 0] / C_pristine[0, 0])
+            Yt  = sigma_2t  * r_matrix
+            Yc  = sigma_2c  * r_matrix
+            S12 = tau_12    * r_matrix
+            S23 = tau_ilss  * r_matrix
+
+        and analogously for the fiber-direction components via a rule-of-
+        mixtures effective-modulus ratio (also taken under a square root).
+
+        Heuristic correlation: per-component strength scales as the square
+        root of the stiffness retention ratio. Loosely motivated by Puck-
+        style strength-stiffness coupling (Puck & Schurmann 2002), but not
+        directly derived from a published model and not validated against
+        experimental degraded-strength data within PorosityFE. Alternative
+        scalings exist in the literature -- e.g. linear (``r``), quadratic
+        (``r**2``), and Davila-style critical-element forms -- and a future
+        kwarg may surface them; today only the sqrt rule is implemented.
+
+        FE vs. empirical divergence
+        ---------------------------
+        The empirical solver uses calibrated knockdown forms (Judd-Wright,
+        power-law, linear) for the same physical effect; the two paths use
+        fundamentally different mathematical forms, so FE and empirical
+        predictions may diverge for the same ``(layup, Vp)``. This is by
+        design -- see the README section on Solver Selection (FE vs.
+        empirical) for guidance on which path to trust for which question.
+
         Parameters
         ----------
         elem_Vp : float
@@ -968,8 +1006,31 @@ class FESolver:
                           e: int, elem_Vp: float) -> np.ndarray:
         """Tsai-Wu polynomial evaluated for one element's Gauss points.
 
-        Bit-identical to the historical implementation. Returns the per-GP
-        failure index array (shape ``(n_gp,)``).
+        The diagonal coefficients ``F1, F2, F11, F22, F33, F44, F55, F66``
+        follow directly from the lamina strength allowables. The off-
+        diagonal interaction coefficient defaults to::
+
+            F_12 = -0.5 * sqrt(F_11 * F_22)
+
+        which is **Tsai's empirical recommendation** (Tsai & Wu 1971), not
+        a first-principles derivation: it produces a closed failure
+        envelope that reduces to the von Mises-like ellipse in the
+        isotropic limit, but the "true" value varies with the material
+        system and ideally comes from biaxial coupon calibration. The
+        default may be overridden per-material by setting
+        :attr:`MaterialProperties.tsai_wu_F12` to a value in ``[-1, 0]``;
+        when set, that user value is used in place of the recommendation.
+        ``F_13`` continues to mirror ``F_12``, and ``F_23`` retains the
+        analogous Tsai recommendation ``-0.5 * sqrt(F_22 * F_33)``.
+
+        Bit-identical to the historical implementation when
+        ``material.tsai_wu_F12 is None``. Returns the per-GP failure index
+        array (shape ``(n_gp,)``).
+
+        References
+        ----------
+        Tsai, S. W. & Wu, E. M. (1971). "A General Theory of Strength for
+        Anisotropic Materials." *J. Composite Materials* 5(1), 58-80.
         """
         Xt_s, Xc_s, Yt_s, Yc_s, S12_s, S23_s = strengths
         with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
@@ -986,7 +1047,14 @@ class FESolver:
             # products in case future refactors break the F11/F22/F33 sign.
             F11_F22 = max(F11 * F22, 0.0)
             F22_F33 = max(F22 * F33, 0.0)
-            F12 = -0.5 * np.sqrt(F11_F22)
+            # Issue #145: honour a user-supplied F_12 when provided.
+            # Validation (None or finite in [-1, 0]) is enforced by
+            # MaterialProperties.__post_init__, so trust the value here.
+            user_F12 = getattr(self.material, 'tsai_wu_F12', None)
+            if user_F12 is None:
+                F12 = -0.5 * np.sqrt(F11_F22)
+            else:
+                F12 = float(user_F12)
             F13 = F12
             F23 = -0.5 * np.sqrt(F22_F33)
 

@@ -183,11 +183,18 @@ def predict_strength(dataset: Dict[str, Any], prop_key: str,
 
     Issue #65: also propagates an assumed Vp measurement uncertainty
     (``sigma_Vp``, default 0.2 vol-% as a fraction — typical microscopy
-    resolution) into a one-sigma confidence band on each predicted point
-    using the closed-form local sensitivity
-    ``KD +/- |dKD/dVp| * sigma_Vp``.  The band is normalized by the same
-    baseline knockdown as the central prediction so it lives in the same
-    "normalized strength" coordinates as the experimental points.
+    resolution) into a one-sigma confidence band on each predicted point.
+
+    Issue #144: bands are now built by re-evaluating the knockdown model
+    at ``Vp - sigma_Vp`` and ``Vp + sigma_Vp`` (a two-point finite-
+    difference) instead of the linear delta-method
+    ``KD +/- |dKD/dVp| * sigma_Vp``.  For nonlinear knockdowns such as
+    Judd-Wright's power law, the linear approximation under-/over-shoots
+    by 10-20% at high Vp; the FD bands are exact at the model's own
+    ``Vp +/- sigma_Vp`` endpoints and naturally asymmetric.  The band is
+    normalized by the same baseline knockdown as the central prediction
+    so it lives in the same "normalized strength" coordinates as the
+    experimental points.
 
     Parameters
     ----------
@@ -231,33 +238,46 @@ def predict_strength(dataset: Dict[str, Any], prop_key: str,
     mode = _PROPERTY_TO_MODE[prop_key]
     baseline_vp = dataset.get('baseline_porosity_pct', 0.0) / 100.0
 
-    def _kd_and_dvp(vp_frac):
+    def _kd(vp_frac):
+        # Clamp into the PorosityField-supported domain [0, 1]. The lower
+        # edge of the 1-sigma band can otherwise dip below 0 for very low
+        # Vp, which is unphysical and would raise from PorosityField.
+        vp_frac = float(min(max(vp_frac, 0.0), 1.0))
         pf = PorosityField(mat, vp_frac, distribution='uniform',
                            void_shape='spherical')
         mesh = CompositeMesh(pf, mat, nx=10, ny=5,
                              nz=mat.n_plies, ply_angles=ply_angles)
         emp = EmpiricalSolver(mesh, mat, ply_angles=ply_angles)
         kd = emp.get_failure_load(mode=mode, model='judd_wright')['knockdown']
-        s = emp.local_sensitivities(mode=mode, model='judd_wright',
-                                    Vp=vp_frac)
-        return float(kd), float(s['dKD_dVp'])
+        return float(kd)
 
     if baseline_vp > 1e-9:
-        kd_base, _ = _kd_and_dvp(baseline_vp)
+        kd_base = _kd(baseline_vp)
     else:
         kd_base = 1.0
 
     predicted = []
     predicted_band = []
     for vp in vp_pcts:
-        kd, dkd_dvp = _kd_and_dvp(vp / 100.0)
+        vp_frac = vp / 100.0
+        kd = _kd(vp_frac)
         norm = kd / kd_base
-        # Linear (delta-method) 1-sigma propagation. Normalization is a
-        # constant w.r.t. Vp, so it falls straight through onto the band.
-        half_width = abs(dkd_dvp) * sigma_Vp / kd_base
+        # Two-point finite-difference 1-sigma propagation (#144). Evaluate
+        # the (nonlinear) knockdown at Vp +/- sigma_Vp instead of using the
+        # local derivative, so the resulting band is exact at the endpoints
+        # and naturally asymmetric for power-law knockdowns. Normalization
+        # is a constant w.r.t. Vp, so it falls straight through onto the
+        # band. Clamping of Vp - sigma_Vp into [0, 1] happens inside _kd.
+        kd_lower = _kd(vp_frac - sigma_Vp)
+        kd_upper = _kd(vp_frac + sigma_Vp)
+        norm_lower = kd_lower / kd_base
+        norm_upper = kd_upper / kd_base
+        # Knockdown is monotone-decreasing in Vp, so kd_upper <= kd_lower.
+        # Order the tuple as (low, high) regardless, so downstream code
+        # that assumes band[0] <= band[1] keeps working.
+        lo, hi = sorted((norm_lower, norm_upper))
         predicted.append(float(norm))
-        predicted_band.append((float(norm - half_width),
-                               float(norm + half_width)))
+        predicted_band.append((float(lo), float(hi)))
     return predicted, predicted_band
 
 

@@ -61,6 +61,13 @@ class MaterialProperties:
     fiber_volume_fraction : float
         Pristine fiber volume fraction ``V_f``, as a fraction in
         ``(0, 1)`` (e.g. ``0.60`` for a 60 % fiber laminate).
+    tsai_wu_F12 : float, optional
+        Tsai-Wu in-plane interaction coefficient (dimensionless).
+        ``None`` (default) defers to Tsai's recommendation
+        ``F_12 = -0.5 * sqrt(F_11 * F_22)`` (Tsai & Wu 1971) inside
+        :meth:`FESolver._evaluate_tsai_wu`. When provided, must lie in
+        ``[-1, 0]`` so the quadratic failure envelope stays closed; for
+        critical applications, calibrate against biaxial coupon data.
 
     Attributes
     ----------
@@ -150,6 +157,11 @@ class MaterialProperties:
     M_ref: float = 0.0                  # Reference moisture (wt %)
     T_g_dry: Optional[float] = None     # Dry glass-transition temperature (deg C)
 
+    # Tsai-Wu interaction coefficient. None (default) -> use Tsai's
+    # recommendation F_12 = -0.5 * sqrt(F_11 * F_22). For critical
+    # applications, calibrate against biaxial coupon data.
+    tsai_wu_F12: Optional[float] = None
+
     def __post_init__(self):
         # Stiffness moduli must be positive finite (non-zero for 1/E in compliance).
         for name in ('E11', 'E22', 'E33', 'G12', 'G13', 'G23',
@@ -227,6 +239,26 @@ class MaterialProperties:
                 f"MaterialProperties.M_ref (moisture wt%) must be >= 0, "
                 f"got {self.M_ref!r}."
             )
+
+        # Tsai-Wu interaction coefficient (issue #145). ``None`` defers to
+        # Tsai's recommendation F_12 = -0.5 * sqrt(F_11 * F_22) inside
+        # :meth:`FESolver._evaluate_tsai_wu`. When the user supplies a
+        # value, require a finite number in [-1, 0] so the quadratic
+        # failure envelope stays closed (physically meaningful). The exact
+        # value within that range is left to user judgement / biaxial
+        # calibration data.
+        if self.tsai_wu_F12 is not None:
+            if (not isinstance(self.tsai_wu_F12, (int, float, np.integer,
+                                                  np.floating))
+                    or isinstance(self.tsai_wu_F12, bool)
+                    or not np.isfinite(float(self.tsai_wu_F12))
+                    or not (-1.0 <= float(self.tsai_wu_F12) <= 0.0)):
+                raise ValueError(
+                    f"MaterialProperties.tsai_wu_F12 must be None or a "
+                    f"finite number in [-1, 0] (Tsai-Wu interaction "
+                    f"coefficient; values outside this range open the "
+                    f"failure envelope), got {self.tsai_wu_F12!r}."
+                )
 
     @property
     def total_thickness(self) -> float:

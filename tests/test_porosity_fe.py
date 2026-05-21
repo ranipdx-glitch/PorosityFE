@@ -3496,6 +3496,71 @@ class TestEmpiricalLayupScaling:
             assert abs(solver.JUDD_WRIGHT_ALPHA[mode] - alpha_qi * 2.0) < 1e-12
 
 
+class TestLayupScaleRegressionPin:
+    """Pin the current ``_layup_scale`` behavior across the intermediate
+    f_md range.
+
+    Snapshot of post-#140 investigation findings. The linear
+    ``f_md / _F_MD_REF`` scaling is preserved pending the validation
+    campaign documented in #140; these values are the current behavior,
+    not an endorsement of correctness. Any future refactor (linear or
+    nonlinear) must explicitly update these snapshots so the change is
+    visible in review.
+
+    Measurement methodology used in #140: relative CLT stiffness
+    retention ratio vs the QI baseline, i.e.
+    ``sqrt(Ex_layup(Vp)/Ex_layup(0)) / sqrt(Ex_QI(Vp)/Ex_QI(0))``,
+    compared against the empirical
+    ``exp(-alpha_QI*(scale_lin - 1)*Vp)`` over Vp in
+    ``[0.005, 0.05]``. Max abs relative error observed across the
+    layups below was 33.5% (UD at Vp=0.05); >5% on UD-heavy, off-axis,
+    and UD layups.
+    """
+
+    def _solver_with_layup(self, ply_angles):
+        material = MATERIALS['T800_epoxy']
+        pf = PorosityField(material, 0.03, distribution='uniform')
+        mesh = CompositeMesh(pf, material, nx=4, ny=3, nz=4)
+        return EmpiricalSolver(mesh, material, ply_angles=ply_angles)
+
+    def test_layup_scale_at_baseline_qi_returns_unity(self):
+        # QI [0,45,-45,90]_s -> f_md = 0.5 -> scale = 1.0 for all modes.
+        solver = self._solver_with_layup([0, 45, -45, 90, 90, -45, 45, 0])
+        for mode in ('compression', 'tension', 'shear', 'ilss',
+                     'transverse_tension'):
+            assert solver._layup_scale(mode) == pytest.approx(1.0, abs=1e-12)
+
+    def test_layup_scale_snapshot_at_intermediate_layups(self):
+        # 4-sig-fig snapshot of the current (linear) layup scale across the
+        # representative layups used in the #140 measurement set.
+        # Update only with an intentional algorithm change.
+        layups = {
+            'qi':       [0, 45, -45, 90, 90, -45, 45, 0],
+            'crossply': [0, 90, 90, 0],
+            'ud_heavy': [0, 0, 90, 90, 0, 0],
+            'off_axis': [0, 15, -15, -15, 15, 0],
+            'ud':       [0, 0, 0, 0, 0, 0],
+        }
+        expected = {
+            # name: (f_md, compression, tension, shear, ilss, transverse_tension)
+            'qi':       (0.5000, 1.000, 1.000, 1.000, 1.000, 1.000),
+            'crossply': (0.5000, 1.000, 1.000, 1.000, 1.000, 1.000),
+            'ud_heavy': (0.3333, 0.6667, 0.6667, 0.6667, 0.8000, 0.8000),
+            'off_axis': (0.3333, 0.6667, 0.6667, 0.6667, 0.8000, 0.8000),
+            'ud':       (0.0000, 0.1500, 0.1500, 0.1500, 0.8000, 0.8000),
+        }
+        for name, ply in layups.items():
+            solver = self._solver_with_layup(ply)
+            exp = expected[name]
+            assert solver.f_md == pytest.approx(exp[0], abs=5e-4), name
+            for i, mode in enumerate(('compression', 'tension', 'shear',
+                                      'ilss', 'transverse_tension'),
+                                     start=1):
+                got = solver._layup_scale(mode)
+                assert got == pytest.approx(exp[i], abs=5e-4), \
+                    f'{name}/{mode}: got {got!r}, expected {exp[i]!r}'
+
+
 class TestEmpiricalLinearSaturation:
     """The linear knockdown clips to 0 once Vp >= 1/beta."""
 
@@ -5216,6 +5281,82 @@ class TestFailureCriteria:
         # The max_fi entry is the scalar; the per-mode entries are NaN.
         assert np.isnan(res.failure_mode_indices['fiber_t'])
         assert np.isnan(res.failure_mode_indices['matrix_c'])
+
+    # ------------------------------------------------------------------
+    # Issue #145: tsai_wu_F12 override on MaterialProperties.
+    # ------------------------------------------------------------------
+    def test_tsai_wu_default_F12_matches_recommendation(self):
+        """tsai_wu_F12=None must reproduce F_12 = -0.5 * sqrt(F_11 * F_22).
+
+        Verified by evaluating the per-GP polynomial on a pure σ_1 σ_2
+        biaxial state and recovering F_12 algebraically.
+        """
+        mat = self.material
+        assert mat.tsai_wu_F12 is None  # built-in preset uses Tsai default
+        # Pristine (Vp=0) strengths so degraded_strengths returns the raw
+        # allowables.
+        strengths = self.solver._degraded_strengths(0.0)
+        Xt_s, Xc_s, Yt_s, Yc_s, _, _ = strengths
+        F11 = 1.0 / (Xt_s * Xc_s)
+        F22 = 1.0 / (Yt_s * Yc_s)
+        F1 = 1.0 / Xt_s - 1.0 / Xc_s
+        F2 = 1.0 / Yt_s - 1.0 / Yc_s
+        F12_expected = -0.5 * np.sqrt(F11 * F22)
+
+        # Build a biaxial stress state and back out the F_12 the solver used.
+        s1, s2 = 100.0, 50.0
+        s = np.array([[s1, s2, 0.0, 0.0, 0.0, 0.0]])
+        fi = self.solver._evaluate_tsai_wu(s, strengths, e=0, elem_Vp=0.0)[0]
+        # fi = F1*s1 + F2*s2 + F11*s1^2 + F22*s2^2 + 2*F12*s1*s2
+        # (other terms vanish because σ_3, shears, and σ_2-σ_3 coupling
+        # all use a zero stress component).
+        diagonal = (F1 * s1 + F2 * s2 + F11 * s1 ** 2 + F22 * s2 ** 2)
+        F12_solver = (fi - diagonal) / (2.0 * s1 * s2)
+        assert F12_solver == pytest.approx(F12_expected, rel=1e-12, abs=1e-18)
+
+    def test_tsai_wu_user_F12_used_when_provided(self):
+        """A user-supplied tsai_wu_F12 must replace the Tsai recommendation."""
+        base = self.material
+        custom_F12 = -0.3
+        mat_custom = dataclasses.replace(base, tsai_wu_F12=custom_F12)
+
+        # Use the same mesh / porosity field as the default solver setup;
+        # only the material differs, so any FI change is attributable to F_12.
+        solver_custom = FESolver(self.mesh, mat_custom, self.pf,
+                                 failure_criterion='tsai_wu')
+
+        strengths = solver_custom._degraded_strengths(0.0)
+        # Biaxial stress state — F_12 only enters via 2*F_12*s1*s2.
+        s1, s2 = 100.0, 50.0
+        s = np.array([[s1, s2, 0.0, 0.0, 0.0, 0.0]])
+        Xt_s, Xc_s, Yt_s, Yc_s, _, _ = strengths
+        F11 = 1.0 / (Xt_s * Xc_s)
+        F22 = 1.0 / (Yt_s * Yc_s)
+        F1 = 1.0 / Xt_s - 1.0 / Xc_s
+        F2 = 1.0 / Yt_s - 1.0 / Yc_s
+        diagonal = (F1 * s1 + F2 * s2 + F11 * s1 ** 2 + F22 * s2 ** 2)
+
+        fi_custom = solver_custom._evaluate_tsai_wu(
+            s, strengths, e=0, elem_Vp=0.0)[0]
+        F12_recovered = (fi_custom - diagonal) / (2.0 * s1 * s2)
+        assert F12_recovered == pytest.approx(custom_F12, rel=1e-12, abs=1e-18)
+
+        # Cross-check: default solver gives a different FI on the same state.
+        fi_default = self.solver._evaluate_tsai_wu(
+            s, strengths, e=0, elem_Vp=0.0)[0]
+        assert fi_custom != pytest.approx(fi_default, rel=1e-12, abs=1e-18)
+
+    def test_tsai_wu_F12_out_of_range_raises(self):
+        """Positive tsai_wu_F12 opens the failure envelope -> ValueError."""
+        base = self.material
+        with pytest.raises(ValueError, match="tsai_wu_F12"):
+            dataclasses.replace(base, tsai_wu_F12=0.5)
+        # Below -1 is equally invalid.
+        with pytest.raises(ValueError, match="tsai_wu_F12"):
+            dataclasses.replace(base, tsai_wu_F12=-1.5)
+        # NaN / inf must also be rejected.
+        with pytest.raises(ValueError, match="tsai_wu_F12"):
+            dataclasses.replace(base, tsai_wu_F12=float('nan'))
 
 
 class TestEmpiricalSolverPlugin:
