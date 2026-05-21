@@ -270,6 +270,27 @@ robust.)
 A runnable side-by-side comparison (table + two PNGs) lives in
 [`examples/distribution_comparison.py`](examples/distribution_comparison.py).
 
+### Solver selection: FE vs. empirical
+
+Both solver paths predict porosity knockdown, but they use different
+physics for the strength-degradation step. The empirical solver
+(`EmpiricalSolver`) applies calibrated closed-form correlations
+(Judd-Wright, power-law, linear) fit to coupon data. The FE solver
+(`FESolver`) instead applies a heuristic sqrt scaling on per-component
+ply strengths (`strength ~ sqrt(stiffness_retention)`; see
+`FESolver._degraded_strengths`). These are fundamentally different
+mathematical forms, so the two paths will give numerically different
+knockdowns for the same `(layup, Vp)` -- this divergence is by design,
+not a bug.
+
+Guidance on which to use:
+
+- **Empirical solver** -- fast screening, headline knockdown numbers,
+  and comparison against published coupon data.
+- **FE solver** -- stress-field analysis, per-element failure criteria
+  (Tsai-Wu / Hashin / max-stress), and any study that needs the full
+  mesh-level result.
+
 ## Output Files
 
 | File Pattern | Description |

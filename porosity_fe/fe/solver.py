@@ -796,6 +796,39 @@ class FESolver:
         stiffness ratio. Strengths are clamped to a small numerical floor so
         the per-criterion polynomial cannot divide by zero.
 
+        Scaling rule
+        ------------
+        Per-component strengths are scaled by the square root of the
+        corresponding stiffness retention ratio. Concretely, for the
+        matrix-dominated components::
+
+            r_matrix = sqrt(C_eff[0, 0] / C_pristine[0, 0])
+            Yt  = sigma_2t  * r_matrix
+            Yc  = sigma_2c  * r_matrix
+            S12 = tau_12    * r_matrix
+            S23 = tau_ilss  * r_matrix
+
+        and analogously for the fiber-direction components via a rule-of-
+        mixtures effective-modulus ratio (also taken under a square root).
+
+        Heuristic correlation: per-component strength scales as the square
+        root of the stiffness retention ratio. Loosely motivated by Puck-
+        style strength-stiffness coupling (Puck & Schurmann 2002), but not
+        directly derived from a published model and not validated against
+        experimental degraded-strength data within PorosityFE. Alternative
+        scalings exist in the literature -- e.g. linear (``r``), quadratic
+        (``r**2``), and Davila-style critical-element forms -- and a future
+        kwarg may surface them; today only the sqrt rule is implemented.
+
+        FE vs. empirical divergence
+        ---------------------------
+        The empirical solver uses calibrated knockdown forms (Judd-Wright,
+        power-law, linear) for the same physical effect; the two paths use
+        fundamentally different mathematical forms, so FE and empirical
+        predictions may diverge for the same ``(layup, Vp)``. This is by
+        design -- see the README section on Solver Selection (FE vs.
+        empirical) for guidance on which path to trust for which question.
+
         Parameters
         ----------
         elem_Vp : float
