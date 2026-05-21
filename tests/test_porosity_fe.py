@@ -5282,6 +5282,82 @@ class TestFailureCriteria:
         assert np.isnan(res.failure_mode_indices['fiber_t'])
         assert np.isnan(res.failure_mode_indices['matrix_c'])
 
+    # ------------------------------------------------------------------
+    # Issue #145: tsai_wu_F12 override on MaterialProperties.
+    # ------------------------------------------------------------------
+    def test_tsai_wu_default_F12_matches_recommendation(self):
+        """tsai_wu_F12=None must reproduce F_12 = -0.5 * sqrt(F_11 * F_22).
+
+        Verified by evaluating the per-GP polynomial on a pure σ_1 σ_2
+        biaxial state and recovering F_12 algebraically.
+        """
+        mat = self.material
+        assert mat.tsai_wu_F12 is None  # built-in preset uses Tsai default
+        # Pristine (Vp=0) strengths so degraded_strengths returns the raw
+        # allowables.
+        strengths = self.solver._degraded_strengths(0.0)
+        Xt_s, Xc_s, Yt_s, Yc_s, _, _ = strengths
+        F11 = 1.0 / (Xt_s * Xc_s)
+        F22 = 1.0 / (Yt_s * Yc_s)
+        F1 = 1.0 / Xt_s - 1.0 / Xc_s
+        F2 = 1.0 / Yt_s - 1.0 / Yc_s
+        F12_expected = -0.5 * np.sqrt(F11 * F22)
+
+        # Build a biaxial stress state and back out the F_12 the solver used.
+        s1, s2 = 100.0, 50.0
+        s = np.array([[s1, s2, 0.0, 0.0, 0.0, 0.0]])
+        fi = self.solver._evaluate_tsai_wu(s, strengths, e=0, elem_Vp=0.0)[0]
+        # fi = F1*s1 + F2*s2 + F11*s1^2 + F22*s2^2 + 2*F12*s1*s2
+        # (other terms vanish because σ_3, shears, and σ_2-σ_3 coupling
+        # all use a zero stress component).
+        diagonal = (F1 * s1 + F2 * s2 + F11 * s1 ** 2 + F22 * s2 ** 2)
+        F12_solver = (fi - diagonal) / (2.0 * s1 * s2)
+        assert F12_solver == pytest.approx(F12_expected, rel=1e-12, abs=1e-18)
+
+    def test_tsai_wu_user_F12_used_when_provided(self):
+        """A user-supplied tsai_wu_F12 must replace the Tsai recommendation."""
+        base = self.material
+        custom_F12 = -0.3
+        mat_custom = dataclasses.replace(base, tsai_wu_F12=custom_F12)
+
+        # Use the same mesh / porosity field as the default solver setup;
+        # only the material differs, so any FI change is attributable to F_12.
+        solver_custom = FESolver(self.mesh, mat_custom, self.pf,
+                                 failure_criterion='tsai_wu')
+
+        strengths = solver_custom._degraded_strengths(0.0)
+        # Biaxial stress state — F_12 only enters via 2*F_12*s1*s2.
+        s1, s2 = 100.0, 50.0
+        s = np.array([[s1, s2, 0.0, 0.0, 0.0, 0.0]])
+        Xt_s, Xc_s, Yt_s, Yc_s, _, _ = strengths
+        F11 = 1.0 / (Xt_s * Xc_s)
+        F22 = 1.0 / (Yt_s * Yc_s)
+        F1 = 1.0 / Xt_s - 1.0 / Xc_s
+        F2 = 1.0 / Yt_s - 1.0 / Yc_s
+        diagonal = (F1 * s1 + F2 * s2 + F11 * s1 ** 2 + F22 * s2 ** 2)
+
+        fi_custom = solver_custom._evaluate_tsai_wu(
+            s, strengths, e=0, elem_Vp=0.0)[0]
+        F12_recovered = (fi_custom - diagonal) / (2.0 * s1 * s2)
+        assert F12_recovered == pytest.approx(custom_F12, rel=1e-12, abs=1e-18)
+
+        # Cross-check: default solver gives a different FI on the same state.
+        fi_default = self.solver._evaluate_tsai_wu(
+            s, strengths, e=0, elem_Vp=0.0)[0]
+        assert fi_custom != pytest.approx(fi_default, rel=1e-12, abs=1e-18)
+
+    def test_tsai_wu_F12_out_of_range_raises(self):
+        """Positive tsai_wu_F12 opens the failure envelope -> ValueError."""
+        base = self.material
+        with pytest.raises(ValueError, match="tsai_wu_F12"):
+            dataclasses.replace(base, tsai_wu_F12=0.5)
+        # Below -1 is equally invalid.
+        with pytest.raises(ValueError, match="tsai_wu_F12"):
+            dataclasses.replace(base, tsai_wu_F12=-1.5)
+        # NaN / inf must also be rejected.
+        with pytest.raises(ValueError, match="tsai_wu_F12"):
+            dataclasses.replace(base, tsai_wu_F12=float('nan'))
+
 
 class TestEmpiricalSolverPlugin:
     """#62: EmpiricalSolver must accept a user-supplied knockdown callable."""

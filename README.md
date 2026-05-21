@@ -450,6 +450,17 @@ Full 3D Tsai-Wu with degraded strengths:
 F1*s1 + F2*s2 + F11*s1^2 + F22*s2^2 + F66*s6^2 + 2*F12*s1*s2 = 1
 ```
 
+**Tsai-Wu `F_12` convention (caveat for external comparisons).** When
+benchmarking PorosityFE Tsai-Wu predictions against another code or
+reference dataset, confirm the in-plane interaction coefficient `F_12`
+convention matches. PorosityFE uses Tsai's recommendation
+`F_12 = -0.5 * sqrt(F_11 * F_22)` (Tsai & Wu, 1971) by default — an
+empirical choice, not a first-principles derivation. The exact value
+varies with the material system; if you have biaxial coupon
+calibration data, override it per-material via
+`MaterialProperties(tsai_wu_F12=...)` (must lie in `[-1, 0]` for a
+closed envelope).
+
 ## Validation
 
 PorosityFE is validated against **13 peer-reviewed experimental datasets**
