@@ -2421,6 +2421,70 @@ class TestApiConsistency:
             with pytest.raises(KeyError, match="return_artifacts"):
                 _ = r[legacy_key]
 
+    # --- #148: pin dict-shim and migration-hint behavior --------------
+
+    def _make_failure_result(self):
+        """Build a FailureResult via the same factory the rest of the
+        suite uses (EmpiricalSolver.get_failure_load)."""
+        pf = PorosityField(self.material, 0.02, distribution='uniform')
+        mesh = CompositeMesh(pf, self.material, nx=4, ny=2, nz=2,
+                             ply_angles='QI')
+        emp = EmpiricalSolver(mesh, self.material)
+        return emp.get_failure_load(mode='compression', model='judd_wright')
+
+    def _make_config_result(self):
+        """Build a ConfigResult via compare_configurations with a single
+        small config (matches the factory used elsewhere in the class)."""
+        results = compare_configurations(
+            0.03, configs={'uniform_spherical':
+                           POROSITY_CONFIGS['uniform_spherical']})
+        return results['uniform_spherical']
+
+    def test_failure_result_dict_shim_unknown_key_raises_keyerror(self):
+        """Unknown keys must raise KeyError (NOT AttributeError) so
+        dict-style back-compat (``result['nope']``) keeps the right
+        exception type for legacy callers wrapping ``try/except KeyError``."""
+        r = self._make_failure_result()
+        with pytest.raises(KeyError):
+            _ = r['nope']
+
+    def test_failure_result_get_returns_default_for_missing(self):
+        """``result.get(key, default)`` must return the default for
+        unknown keys rather than raising."""
+        r = self._make_failure_result()
+        assert r.get('nope', 'fallback') == 'fallback'
+        # Sanity: known key still resolves through .get().
+        assert r.get('knockdown') == r.knockdown
+
+    def test_failure_result_keys_includes_documented_fields(self):
+        """``keys()`` must surface the three documented direct fields
+        (``failure_stress``, ``knockdown``, ``model``) so legacy
+        ``for k in result:``-style code sees them."""
+        r = self._make_failure_result()
+        ks = r.keys()
+        assert 'failure_stress' in ks
+        assert 'knockdown' in ks
+        assert 'model' in ks
+
+    def test_failure_result_to_dict_matches_attribute_access(self):
+        """``to_dict()`` must mirror attribute access for the documented
+        direct fields (the legacy dict-returning shape)."""
+        r = self._make_failure_result()
+        d = r.to_dict()
+        assert d['knockdown'] == r.knockdown
+        assert d['failure_stress'] == r.failure_stress
+        assert d['model'] == r.model
+
+    def test_config_result_artifact_keys_hint_at_return_artifacts(self):
+        """The migration-hint KeyError for moved keys
+        (``mesh`` / ``empirical_solver`` / ``porosity_field`` /
+        ``field_results``) must mention ``return_artifacts`` so callers
+        know where their data went."""
+        r = self._make_config_result()
+        for artifact_key in self.ConfigResult._ARTIFACT_KEYS:
+            with pytest.raises(KeyError, match='return_artifacts'):
+                _ = r[artifact_key]
+
 
 class TestEnvironmentalKnockdown:
     """#59: hygrothermal (T/M) and S-N fatigue knockdown surfaces.
