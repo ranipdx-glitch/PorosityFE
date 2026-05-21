@@ -4401,6 +4401,55 @@ class TestCLIMain:
         assert '--vp 0.0300' in err
         assert '--vp-pct 3' in err
 
+    # #147: pin the two uncovered error-handling branches in cli.main so
+    # future refactors can't silently drop the user-facing hints.
+
+    def test_cli_main_vp_out_of_range_with_percentage_hint(
+            self, tmp_path, capsys):
+        """`--vp 5` is in the 1-100 "looks like a percentage" band, so the
+        error must include BOTH the fraction-form suggestion (`--vp 0.0500`)
+        and the percent-alias suggestion (`--vp-pct 5`). Regression for the
+        hint added in #127/#137 — covers cli.py lines ~270-275."""
+        with pytest.raises(SystemExit) as exc:
+            porosity_fe_analysis.main([
+                '--vp', '5',
+                '--output-dir', str(tmp_path),
+            ])
+        # argparse.error() exits with code 2 for invalid usage.
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        # Both alternatives must be surfaced so the user can pick.
+        assert '--vp 0.0500' in err
+        assert '--vp-pct 5' in err
+
+    def test_cli_main_output_dir_permission_error(
+            self, tmp_path, monkeypatch, capsys):
+        """If ``os.makedirs`` raises OSError (e.g. permission denied or an
+        invalid path), the CLI must surface the failure on stderr and
+        return exit code 2 rather than crashing with a traceback. Covers
+        cli.py lines ~284-287."""
+        def _raise_permission_error(*args, **kwargs):
+            raise PermissionError("denied")
+
+        # Patch ``os.makedirs`` on the cli module so the call inside
+        # main() picks up the raising stub. The shim doesn't re-export
+        # the cli submodule, so import it via the package directly.
+        from porosity_fe import cli as _cli_mod
+        monkeypatch.setattr(
+            _cli_mod.os, 'makedirs',
+            _raise_permission_error,
+        )
+        rc = porosity_fe_analysis.main([
+            '--vp', '0.02',
+            '--output-dir', str(tmp_path / 'nope'),
+            '--quiet',
+        ])
+        assert rc == 2
+        err = capsys.readouterr().err
+        # Error message should mention the underlying failure so the user
+        # knows what went wrong.
+        assert 'denied' in err.lower() or 'permission' in err.lower()
+
 
 class TestMaterialPropertiesPerturb:
     """Unit tests for the MaterialProperties.perturb sampling primitive."""
