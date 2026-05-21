@@ -3284,7 +3284,7 @@ class TestLayupParser:
     """parse_layup is a pure helper extracted in #9; tested here for #12."""
 
     def setup_method(self):
-        from app import parse_layup
+        from porosity_fe.reporting import parse_layup
         self.parse_layup = parse_layup
 
     def test_simple_slash_form(self):
@@ -3346,14 +3346,14 @@ class TestExportHelpers:
         }
 
     def test_build_export_payload_shape(self):
-        from app import build_export_payload
+        from porosity_fe.reporting import build_export_payload
         payload = build_export_payload(self._sample_result())
         assert payload["config"]["material"] == "T800_epoxy"
         assert payload["config"]["mesh"] == "30x10x12"
         assert payload["empirical"]["compression"]["judd_wright"]["knockdown"] == 0.823
 
     def test_write_results_json_round_trips(self, tmp_path):
-        from app import build_export_payload, write_results_json
+        from porosity_fe.reporting import build_export_payload, write_results_json
         path = str(tmp_path / "out.json")
         write_results_json(path, build_export_payload(self._sample_result()))
         with open(path, encoding="utf-8") as f:
@@ -3361,7 +3361,7 @@ class TestExportHelpers:
         assert data["empirical"]["compression"]["judd_wright"]["knockdown"] == 0.823
 
     def test_write_results_csv_header_and_rows(self, tmp_path):
-        from app import build_export_payload, write_results_csv
+        from porosity_fe.reporting import build_export_payload, write_results_csv
         path = str(tmp_path / "out.csv")
         write_results_csv(path, build_export_payload(self._sample_result()))
         with open(path, encoding="utf-8") as f:
@@ -3378,7 +3378,7 @@ class TestExportHelpers:
 
     def test_write_results_csv_round_trips_via_csv_module(self, tmp_path):
         import csv as _csv
-        from app import build_export_payload, write_results_csv
+        from porosity_fe.reporting import build_export_payload, write_results_csv
         path = str(tmp_path / "out.csv")
         write_results_csv(path, build_export_payload(self._sample_result()))
         with open(path, encoding="utf-8", newline="") as f:
@@ -3432,7 +3432,7 @@ class TestNCRExport:
         return meta
 
     def test_governing_failure_picks_lowest_knockdown(self):
-        from app import governing_failure
+        from porosity_fe.reporting import governing_failure
         worst = governing_failure(self._result(comp_kd=0.823, ilss_kd=0.744))
         assert worst["mode"] == "ilss"
         assert worst["model"] == "judd_wright"
@@ -3440,7 +3440,7 @@ class TestNCRExport:
         assert worst["residual_strength_MPa"] == 67.0
 
     def test_recommend_disposition_bins_by_severity(self):
-        from app import recommend_disposition
+        from porosity_fe.reporting import recommend_disposition
         uai = recommend_disposition(0.8, 0.97, "primary")
         assert uai["path"].startswith("Use-As-Is (UAI)")
         repair = recommend_disposition(7.0, 0.65, "primary")
@@ -3450,12 +3450,12 @@ class TestNCRExport:
         assert uai["cited_criteria"] and uai["required_mrb_actions"]
 
     def test_recommend_disposition_primary_requires_concurrence(self):
-        from app import recommend_disposition
+        from porosity_fe.reporting import recommend_disposition
         d = recommend_disposition(0.5, 0.98, "primary")
         assert any("concurrence" in a for a in d["required_mrb_actions"])
 
     def test_build_ncr_record_shape(self):
-        from app import build_ncr_record
+        from porosity_fe.reporting import build_ncr_record
         ncr = build_ncr_record(self._result(), self._meta())
         # Lightweight summary metadata — no part/serial/work-order fields.
         assert ncr["summary"]["prepared_by"] == "J. Engineer"
@@ -3469,7 +3469,7 @@ class TestNCRExport:
         assert ncr["recommended_disposition"]["path"]
 
     def test_serialise_ncr_json_envelope_and_round_trip(self, tmp_path):
-        from app import build_ncr_record, write_ncr_json
+        from porosity_fe.reporting import build_ncr_record, write_ncr_json
         from porosity_fe_analysis import FORMAT_NCR, load_results_from_json
         path = str(tmp_path / "ncr.json")
         write_ncr_json(path, build_ncr_record(self._result(), self._meta()))
@@ -3479,7 +3479,7 @@ class TestNCRExport:
         assert data["summary"]["prepared_by"] == "J. Engineer"
 
     def test_serialise_ncr_markdown_has_sections(self, tmp_path):
-        from app import build_ncr_record, write_ncr_markdown
+        from porosity_fe.reporting import build_ncr_record, write_ncr_markdown
         path = str(tmp_path / "ncr.md")
         write_ncr_markdown(path, build_ncr_record(self._result(), self._meta()))
         with open(path, encoding="utf-8") as f:
@@ -3491,7 +3491,7 @@ class TestNCRExport:
         assert "Engineering Analysis" in md
 
     def test_serialise_ncr_pdf_is_valid_pdf(self, tmp_path):
-        from app import build_ncr_record, serialise_ncr_pdf, write_ncr_pdf
+        from porosity_fe.reporting import build_ncr_record, serialise_ncr_pdf, write_ncr_pdf
         ncr = build_ncr_record(self._result(), self._meta())
         blob = serialise_ncr_pdf(ncr)
         assert isinstance(blob, bytes)
