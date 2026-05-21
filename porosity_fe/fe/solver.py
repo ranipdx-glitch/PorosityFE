@@ -320,7 +320,7 @@ class FESolver:
     3. Apply penalty method
     4. Solve K*u = F via spsolve
     5. Recover stresses at Gauss points
-    6. Evaluate Tsai-Wu failure at each GP
+    6. Evaluate failure criterion at each GP (Tsai-Wu, Hashin, or max-stress)
     7. Compute knockdown factor
 
     Parameters
@@ -342,6 +342,16 @@ class FESolver:
         per-element transformations used during solve. Passing ``None``
         is deprecated and resolved to ``'QI'`` with a
         :class:`DeprecationWarning` (#44 item 2).
+    failure_criterion : {'tsai_wu', 'hashin', 'max_stress'}, optional
+        Default failure criterion used by :meth:`solve` when no per-call
+        override is supplied. ``'tsai_wu'`` (default) applies the
+        quadratic Tsai-Wu interaction polynomial and preserves the
+        historical bit-identical behavior. ``'hashin'`` uses the Hashin
+        2D criterion with separate fiber/matrix tension/compression
+        modes. ``'max_stress'`` uses an uncoupled maximum-stress check
+        against each lamina strength. Validated against
+        :attr:`SUPPORTED_FAILURE_CRITERIA`; an unknown value raises
+        :class:`ValueError`.
 
     Notes
     -----
@@ -457,7 +467,10 @@ class FESolver:
         Raises
         ------
         ValueError
-            If ``solver`` is not one of ``'direct'``, ``'cg'``, ``'minres'``.
+            If ``failure_criterion`` is not one of ``'tsai_wu'``,
+            ``'hashin'``, ``'max_stress'`` (validated against
+            :attr:`SUPPORTED_FAILURE_CRITERIA`), or if ``solver`` is not
+            one of ``'direct'``, ``'cg'``, ``'minres'``.
         RuntimeError
             If the iterative solver fails to converge to ``rtol``, or if
             the direct solve produces non-finite values / a residual above

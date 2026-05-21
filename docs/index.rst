@@ -7,8 +7,8 @@ through-thickness porosity profile, degrades the lamina stiffness via
 Mori-Tanaka homogenization, and evaluates Tsai-Wu failure on a structured
 8-node hex mesh.
 
-This site is the **API reference** for the public Python module
-``porosity_fe_analysis``. The same code also ships a Streamlit web app
+This site is the **API reference** for the public Python package
+``porosity_fe``. The same code also ships a Streamlit web app
 (``app.py``) and a CLI (``validate_porosity_cli``), which are documented
 in the project README on GitHub.
 
@@ -36,7 +36,7 @@ A 2 %-porosity T800/epoxy laminate, compressed in displacement control:
 
 .. code-block:: python
 
-   from porosity_fe_analysis import (
+   from porosity_fe import (
        MATERIALS, PorosityField, CompositeMesh, FESolver,
    )
 
@@ -51,7 +51,7 @@ A 2 %-porosity T800/epoxy laminate, compressed in displacement control:
    print(f"stiffness knockdown = {result.knockdown:.3f}")
 
 For the empirical (closed-form) knockdown models, use
-:class:`~porosity_fe_analysis.EmpiricalSolver`.
+:class:`~porosity_fe.EmpiricalSolver`.
 
 Contents
 --------

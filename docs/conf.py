@@ -13,7 +13,7 @@ import os
 import sys
 from datetime import date
 
-# Make the top-level porosity_fe_analysis module importable for autodoc.
+# Make the top-level porosity_fe package importable for autodoc.
 sys.path.insert(0, os.path.abspath(".."))
 
 # -- Project information -----------------------------------------------------
@@ -45,7 +45,7 @@ extensions = [
 autosummary_generate = True
 
 # Document members in source order (matches the layout of
-# porosity_fe_analysis.py: MaterialProperties, VoidGeometry, ...).
+# porosity_fe: MaterialProperties, VoidGeometry, ...).
 autodoc_member_order = "bysource"
 autodoc_default_options = {
     "members": True,

@@ -60,5 +60,13 @@ jobs:
     - name: Run tests
       run: pytest tests/ -v --tb=short
 
+    - name: Install Streamlit for smoke test
+      # Streamlit is an optional (`web` extra) dependency, not a runtime
+      # requirement of the CLI/library, so it is not in requirements.txt.
+      # Install it explicitly before the import smoke test. Tests no
+      # longer import from `app`; the shared helpers live in
+      # `porosity_fe.reporting`.
+      run: pip install -r requirements-web.txt
+
     - name: Smoke-test Streamlit app imports
       run: python -c "import app; print('app imports OK')"

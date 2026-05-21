@@ -15,7 +15,7 @@ Run from the repo root::
 import os
 import sys
 
-# Make sibling porosity_fe_analysis importable when the package is not
+# Make the sibling porosity_fe package importable when it is not
 # pip-installed (matches the project's conftest.py path adjustment).
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
@@ -25,7 +25,7 @@ import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
 
-from porosity_fe_analysis import (  # noqa: E402
+from porosity_fe import (  # noqa: E402
     MATERIALS,
     CompositeMesh,
     EmpiricalSolver,

@@ -30,7 +30,7 @@ Gallery
   Interface-concentrated porosity with penny-shaped voids -- the
   worst-case ILSS morphology.
 * ``examples/discrete_voids.py`` --
-  Explicit :class:`~porosity_fe_analysis.VoidGeometry` ellipsoids layered
+  Explicit :class:`~porosity_fe.VoidGeometry` ellipsoids layered
   on top of a low-uniform background; visualises the stress-concentration
   field around one void.
 * ``examples/compute_degraded_clt_moduli.py`` --

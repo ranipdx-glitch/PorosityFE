@@ -44,7 +44,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from porosity_fe_analysis import (  # noqa: E402
+from porosity_fe import (  # noqa: E402
     MATERIALS,
     CompositeMesh,
     EmpiricalSolver,

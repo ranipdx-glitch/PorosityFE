@@ -27,7 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from porosity_fe_analysis import MATERIALS, compute_degraded_clt_moduli  # noqa: E402
+from porosity_fe import MATERIALS, compute_degraded_clt_moduli  # noqa: E402
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 os.makedirs(OUT_DIR, exist_ok=True)

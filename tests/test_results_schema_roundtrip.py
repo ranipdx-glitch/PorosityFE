@@ -74,7 +74,7 @@ def test_ncr_format_validates_against_schema(tmp_path):
     must validate against the same shared schema (#20)."""
     import jsonschema
 
-    from app import build_ncr_record, write_ncr_json
+    from porosity_fe.reporting import build_ncr_record, write_ncr_json
 
     result = {
         "config": {
