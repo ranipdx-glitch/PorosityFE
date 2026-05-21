@@ -5000,3 +5000,51 @@ class TestEmpiricalSolverPlugin:
             assert 'flat' in results[mode]
             assert results[mode]['flat']['knockdown'] == pytest.approx(
                 0.5, rel=1e-12)
+
+
+class TestCoefficientOverrideValidation:
+    """#150: pin the user-facing customization surfaces of EmpiricalSolver.
+
+    Covers (a) the per-mode coefficient-override validation inside
+    :meth:`EmpiricalSolver._merge_coefficient_override` and (b) the
+    user-supplied knockdown callable validation inside
+    :meth:`EmpiricalSolver._validate_user_kd_callable` (which the
+    constructor does not invoke; validation happens at dispatch time via
+    :meth:`apply_loading` / :meth:`get_failure_load`).
+    """
+
+    def setup_method(self):
+        self.material = MATERIALS['T800_epoxy']
+        self.pf = PorosityField(self.material, 0.03, distribution='uniform')
+        self.mesh = CompositeMesh(self.pf, self.material, nx=4, ny=2, nz=2)
+
+    def test_coefficient_override_rejects_non_numeric(self):
+        """Non-numeric override values must raise TypeError naming the key."""
+        with pytest.raises(TypeError, match=r"must be a number"):
+            EmpiricalSolver(self.mesh, self.material,
+                            judd_wright_alpha={'compression': 'invalid'})
+
+    def test_coefficient_override_rejects_negative(self):
+        """Negative coefficients must raise ValueError ('positive finite')."""
+        with pytest.raises(ValueError, match=r"positive finite"):
+            EmpiricalSolver(self.mesh, self.material,
+                            power_law_n={'compression': -0.5})
+
+    def test_coefficient_override_rejects_infinite(self):
+        """Non-finite (inf) coefficients must raise ValueError."""
+        with pytest.raises(ValueError, match=r"positive finite"):
+            EmpiricalSolver(self.mesh, self.material,
+                            linear_beta={'compression': float('inf')})
+
+    def test_user_callable_exception_wrapped_with_context(self):
+        """An exception raised inside a user knockdown callable must be
+        re-raised as ValueError carrying the original exception type name."""
+        solver = EmpiricalSolver(self.mesh, self.material)
+
+        def bad_kd(Vp, mode):
+            raise ZeroDivisionError("oops")
+
+        with pytest.raises(ValueError, match=r"ZeroDivisionError") as exc_info:
+            solver.apply_loading(mode='compression', model=bad_kd)
+        # Validation message should also surface the original message text.
+        assert 'oops' in str(exc_info.value)
